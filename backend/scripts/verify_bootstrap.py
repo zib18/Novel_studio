@@ -27,16 +27,15 @@ def verify_gitignore() -> None:
         "node_modules/ignored.js",
     ]
     result = subprocess.run(
-        ["git", "check-ignore", "--no-index", "--stdin"],
-        input="\n".join(paths) + "\n",
+        ["git", "check-ignore", "--no-index", "--stdin", "-z"],
+        input=b"\0".join(path.encode("utf-8") for path in paths) + b"\0",
         cwd=ROOT,
-        text=True,
         capture_output=True,
         check=False,
     )
     if result.returncode not in (0, 1):
-        raise RuntimeError(result.stderr)
-    ignored = set(result.stdout.splitlines())
+        raise RuntimeError(result.stderr.decode("utf-8", errors="replace"))
+    ignored = set(result.stdout.decode("utf-8").rstrip("\0").split("\0"))
     missing = set(paths) - ignored
     if missing:
         raise RuntimeError(f"Git не игнорирует нужные пути: {sorted(missing)}")
@@ -107,5 +106,7 @@ def verify_server() -> None:
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     verify_gitignore()
     verify_server()
