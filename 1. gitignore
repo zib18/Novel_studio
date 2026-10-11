@@ -1,0 +1,41 @@
+# Секреты и локальные настройки
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Пользовательские данные
+backend/data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Frontend
+node_modules/
+dist/
+.vite/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.jks
+*.keystore
+
+# Система
+.DS_Store
+Thumbs.db
