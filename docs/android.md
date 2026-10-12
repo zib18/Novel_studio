@@ -54,6 +54,7 @@ cookie/CSRF. Сервер должен быть доступен. Удалённ
 Из корня репозитория после сборки frontend/dist:
 
 ```powershell
+npm init -y
 npm install --no-save @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7 typescript@5.9.2
 $env:NOVEL_STUDIO_ORIGIN = "https://your-novel-studio.example"
 npx cap add android
