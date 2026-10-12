@@ -122,10 +122,16 @@ def reject_job(job_id: str, db=Depends(get_db), user=Depends(get_current_user)):
         raise HTTPException(409, "Задача ещё не завершена.")
     artifacts = deepcopy(job.artifacts)
     artifacts["author_decision"] = "rejected"
-    job.artifacts = artifacts
-    job.status = "rejected"
-    job.updated_at = utc_now()
+    changed = db.execute(update(GenerationJob).where(
+        GenerationJob.id == job.id,
+        GenerationJob.status.in_(("awaiting_author", "needs_author_review", "failed"))
+    ).values(artifacts=artifacts, status="rejected", updated_at=utc_now())
+      .execution_options(synchronize_session=False)).rowcount
+    if changed != 1:
+        db.rollback()
+        raise HTTPException(409, "По задаче уже принято другое решение. Обновите результат.")
     db.commit()
+    db.refresh(job)
     return job_view(job)
 
 
@@ -159,10 +165,17 @@ def apply_job(job_id: str, body: ApplyJob, db=Depends(get_db), user=Depends(get_
     artifacts = deepcopy(job.artifacts)
     artifacts["author_decision"] = "accepted"
     artifacts["applied_revision_id"] = revision.id
-    job.artifacts = artifacts
-    job.status = "applied"
-    job.updated_at = utc_now()
+    changed = db.execute(update(GenerationJob).where(
+        GenerationJob.id == job.id,
+        GenerationJob.status.in_(("awaiting_author", "needs_author_review")),
+        GenerationJob.cancel_requested.is_(False)
+    ).values(artifacts=artifacts, status="applied", updated_at=utc_now())
+      .execution_options(synchronize_session=False)).rowcount
+    if changed != 1:
+        db.rollback()
+        raise HTTPException(409, "Результат отменён, отклонён или уже применён. Обновите задачу.")
     db.commit()
+    db.refresh(job)
     return {"revision": {"id": revision.id, "chapter_id": revision.chapter_id, "text": revision.text},
             "job": job_view(job)}
 

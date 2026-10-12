@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import {describe,expect,it} from 'vitest';
 import {ApiError} from './api';
-import {editDraft,getCache,getDraft,initialiseDraft,listBackups,putCache,resolveConflict,syncDraft,type PendingMutation} from './drafts';
+import {editDraft,getCache,getDraft,initialiseDraft,listBackups,putCache,resolveConflict,syncDraft,waitForDraftSync,type PendingMutation} from './drafts';
 import type {Chapter,Revision} from './types';
 const fixture=async()=>{const owner=crypto.randomUUID(),id=crypto.randomUUID(),chapter:Chapter={id,novel_id:crypto.randomUUID(),number:1,title:'Глава'},revision:Revision={id:crypto.randomUUID(),chapter_id:id,text:'Исходный текст'};await initialiseDraft(owner,chapter,revision);return {owner,chapter,revision};};
 function deferred<T>(){let resolve!:(value:T)=>void;const promise=new Promise<T>(done=>{resolve=done;});return {promise,resolve};}
@@ -14,4 +14,15 @@ describe('постоянные локальные черновики',()=>{
  it('при 409 оставляет обе версии и ждёт решения автора',async()=>{const {owner,chapter,revision}=await fixture();await editDraft(owner,chapter.id,'Моя редакция');await expect(syncDraft(owner,chapter.id,async()=>{throw new ApiError(409,{},'version conflict');})).rejects.toThrow('version conflict');expect((await getDraft(owner,chapter.id))?.text).toBe('Моя редакция');expect((await getDraft(owner,chapter.id))?.state).toBe('conflict');const server={...revision,id:'server-latest',text:'Правка на другом устройстве'},resolved=await resolveConflict(owner,chapter.id,'Объединённый автором текст',server);expect(resolved.baseRevisionId).toBe('server-latest');expect(resolved.text).toBe('Объединённый автором текст');expect((await listBackups(owner,chapter.id))[0].text).toBe('Моя редакция');});
  it('загрузка серверной главы не заменяет грязный локальный черновик',async()=>{const {owner,chapter,revision}=await fixture();await editDraft(owner,chapter.id,'Сохранённое на устройстве');const current=await initialiseDraft(owner,chapter,{...revision,id:'changed',text:'Серверная версия'});expect(current.text).toBe('Сохранённое на устройстве');expect(current.serverRevision?.text).toBe('Серверная версия');expect(current.state).toBe('conflict');});
  it('грязный черновик остаётся при серверном GET после потерянного ответа',async()=>{const {owner,chapter,revision}=await fixture();await editDraft(owner,chapter.id,'Первая правка');await expect(syncDraft(owner,chapter.id,async()=>{throw new ApiError(0,{},'lost');})).rejects.toThrow('lost');await editDraft(owner,chapter.id,'Более новая правка');const current=await initialiseDraft(owner,chapter,{...revision,id:'already-saved',text:'Первая правка'});expect(current.text).toBe('Более новая правка');expect(current.pending?.text).toBe('Первая правка');});
+});
+
+it('завершение синхронизации удерживает главу до подтверждения позднего запроса',async()=>{
+ const {owner,chapter}=await fixture();await editDraft(owner,chapter.id,'Отправленный текст');
+ const entered=deferred<void>(),response=deferred<Revision>();
+ const syncing=syncDraft(owner,chapter.id,async()=>{entered.resolve();return response.promise;});
+ await entered.promise;let released=false;
+ const waiting=waitForDraftSync(owner,chapter.id).then(()=>{released=true;});
+ await Promise.resolve();expect(released).toBe(false);
+ response.resolve({id:'saved',text:'Отправленный текст'});
+ await Promise.all([syncing,waiting]);expect(released).toBe(true);
 });

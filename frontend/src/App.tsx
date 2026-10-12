@@ -1,4 +1,4 @@
-import {useCallback,useEffect,useState} from 'react';
+import {useCallback,useEffect,useRef,useState} from 'react';
 import {api,errorMessage,post,setCsrfToken} from './api';
 import {getCache,putCache} from './drafts';
 import type {Novel,Page,Session,User} from './types';
@@ -15,6 +15,7 @@ const remembered=():User|null=>{try{return JSON.parse(localStorage.getItem('nove
 export function App(){
  const [user,setUser]=useState<User|null>(null),[ready,setReady]=useState(false),[offline,setOffline]=useState(false),[message,setMessage]=useState('');
  const [novels,setNovels]=useState<Novel[]>([]),[novel,setNovel]=useState<Novel|null>(null),[screen,setScreen]=useState<Screen>('library'),[menu,setMenu]=useState(false);
+ const ownerRef=useRef<string|null>(null);ownerRef.current=user?.id??null;
  const notify=useCallback((text:string)=>setMessage(text),[]);
  useEffect(()=>{
   let cancelled=false;
@@ -23,13 +24,13 @@ export function App(){
   window.addEventListener('online',online);window.addEventListener('offline',offlineEvent);
   return()=>{cancelled=true;window.removeEventListener('online',online);window.removeEventListener('offline',offlineEvent);};
  },[notify]);
- const loadLibrary=useCallback(async(owner:User)=>{try{const page=await api<Page<Novel>>('/novels');setNovels(page.items);await putCache(owner.id,'novels',page.items);setOffline(false);}catch(error){setNovels(await getCache<Novel[]>(owner.id,'novels')??[]);notify(errorMessage(error));}},[notify]);
- useEffect(()=>{if(user){applyPreferences(getPreferences(user.id));setNovel(null);setScreen('library');void loadLibrary(user);}},[user,loadLibrary]);
+ const loadLibrary=useCallback(async(owner:User)=>{try{const page=await api<Page<Novel>>('/novels');if(ownerRef.current!==owner.id)return;setNovels(page.items);await putCache(owner.id,'novels',page.items);setOffline(false);}catch(error){const cached=await getCache<Novel[]>(owner.id,'novels')??[];if(ownerRef.current!==owner.id)return;setNovels(cached);notify(errorMessage(error));}},[notify]);
+ useEffect(()=>{if(user){setNovels([]);applyPreferences(getPreferences(user.id));setNovel(null);setScreen('library');void loadLibrary(user);}},[user,loadLibrary]);
  const selectNovel=(selected:Novel)=>{setNovel(selected);setScreen('editor');setMenu(false);};
  const updateNovel=(updated:Novel)=>{setNovel(updated);setNovels(current=>current.map(n=>n.id===updated.id?updated:n));if(user)void putCache(user.id,'novel:'+updated.id,updated).catch(e=>notify(errorMessage(e)));};
- const signOut=async()=>{try{await post('/auth/logout');setUser(null);setNovel(null);localStorage.removeItem('novel-studio-last-user');}catch(error){notify(errorMessage(error));}};
+ const signOut=async()=>{try{await post('/auth/logout');ownerRef.current=null;setNovels([]);setUser(null);setNovel(null);localStorage.removeItem('novel-studio-last-user');}catch(error){notify(errorMessage(error));}};
  if(!ready)return <div className="splash"><div className="brand-mark">N</div><p>Открываем студию…</p></div>;
- if(!user)return <Login message={message} onLogin={session=>{setCsrfToken(session.csrf_token);setUser(session.user);if(session.user)remember(session.user);setMessage('');}} />;
+ if(!user)return <Login message={message} onLogin={session=>{ownerRef.current=session.user?.id??null;setNovels([]);setCsrfToken(session.csrf_token);setUser(session.user);if(session.user)remember(session.user);setMessage('');}} />;
  return <div className="studio"><aside className={'sidebar '+(menu?'is-open':'')}><a className="brand" href="#" onClick={e=>{e.preventDefault();setScreen('library');setMenu(false);}}><span className="brand-mark">N</span><span>Novel<span className="brand-sub">STUDIO</span></span></a><p className="sidebar-caption">ПРОСТРАНСТВО АВТОРА</p>
  <nav aria-label="Главное меню">{screens.map(([key,name,icon])=><button key={key} className={'nav-link '+(screen===key?'active':'')} disabled={!novel&&key!=='library'&&key!=='settings'} onClick={()=>{setScreen(key);setMenu(false);}}><span>{icon}</span>{name}</button>)}</nav>
  {novel&&<div className="sidebar-project"><small>ТЕКУЩИЙ РОМАН</small><strong>{novel.title}</strong><span>{novel.genre||'Жанр не указан'}</span><span>Канон · версия {novel.canon_version}</span></div>}

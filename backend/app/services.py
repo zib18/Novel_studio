@@ -147,15 +147,15 @@ def confirm_entry(db, entry, novel, user, decision):
     old = db.get(BibleEntry, entry.supersedes_id) if entry.supersedes_id else None
     if old and decision.action == "approve" and (not old.active or old.status not in APPROVED):
         fail(409, "replacement_conflict", "Заменяемый факт уже изменён")
+    canon_changed = db.execute(update(Novel).where(
+        Novel.id == novel.id, Novel.canon_version == decision.expected_canon_version
+    ).values(canon_version=Novel.canon_version + 1, updated_at=utcnow())
+                               .execution_options(synchronize_session=False)).rowcount
     changed = db.execute(update(BibleEntry).where(
         BibleEntry.id == entry.id, BibleEntry.version == decision.base_version,
         BibleEntry.active.is_(True)
     ).values(status=target, version=entry.version + 1)
                          .execution_options(synchronize_session=False)).rowcount
-    canon_changed = db.execute(update(Novel).where(
-        Novel.id == novel.id, Novel.canon_version == decision.expected_canon_version
-    ).values(canon_version=Novel.canon_version + 1, updated_at=utcnow())
-                               .execution_options(synchronize_session=False)).rowcount
     if changed != 1 or canon_changed != 1:
         db.rollback()
         fail(409, "canon_conflict", "Канон изменился; обновите его перед подтверждением")
@@ -186,7 +186,8 @@ def confirm_entry(db, entry, novel, user, decision):
                               description=f"Автор заменил имя «{old_name}» на «{new_name}»",
                               source_decision_id=audit.id, severity="critical"))
     if target == "REJECTED":
-        db.add(RejectRule(novel_id=novel.id, phrase=entry.details.get("rejected_phrase", ""),
+        db.add(RejectRule(novel_id=novel.id, phrase=entry.details.get("rejected_phrase", "")
+                          if isinstance(entry.details.get("rejected_phrase", ""), str) else "",
                           description=f"Отклонено автором: {entry.title}. {decision.reason}",
                           source_decision_id=audit.id, severity="critical"))
     db.commit()

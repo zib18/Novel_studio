@@ -103,3 +103,8 @@ export function syncDraft(owner:string,chapterId:string,transport:SaveTransport)
  })();
  inFlight.set(key,task);void task.finally(()=>{if(inFlight.get(key)===task)inFlight.delete(key);}).catch(()=>{});return task;
 }
+
+/** Keep the chapter lock until all requests already started for it settle. */
+export async function waitForDraftSync(owner:string,chapterId:string):Promise<void>{
+ await inFlight.get(localKey(owner,chapterId))?.catch(()=>undefined);
+}

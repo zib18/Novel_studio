@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import User, Novel, Chapter, Revision
 from app.services import save_revision, payload_hash
-from app.generation.api import apply_job
+from app.generation.api import apply_job, reject_job
 from app.generation.context import safe_entry
 from app.generation.models import GenerationJob, UsageLedger
 from app.generation.pipeline import Pipeline, LeaseLost, validate_report
@@ -387,3 +387,54 @@ def test_future_fact_released_at_approved_chapter():
     item = {"id": "secret", "status": "FUTURE_CANON", "available_from_chapter": 5,
             "details": {"reveal_markers": ["скрытый отец"]}}
     assert not validate_text("Он её скрытый отец.", snapshot(chapter_number=5, bible=[item]))
+
+
+@pytest.mark.asyncio
+async def test_stale_apply_cannot_override_committed_author_rejection(storage):
+    db, factory, user, novel, chapter = storage
+    job = job_for(db, user, novel, chapter)
+    await Pipeline(db, job, FakeProvider(), settings()).execute()
+    job_id, chapter_id, base_id = job.id, chapter.id, job.base_revision_id
+    with factory() as stale_db:
+        stale_job = stale_db.get(GenerationJob, job_id)
+        assert stale_job.status == "awaiting_author"
+        rejected = reject_job(job_id, db=db, user=user)
+        assert rejected["status"] == "rejected"
+        assert stale_job.status == "awaiting_author"
+        with pytest.raises(HTTPException) as error:
+            apply_job(job_id, ApplyJob(base_revision_id=base_id, mutation_id=str(uuid4())), db=stale_db, user=user)
+        assert error.value.status_code == 409
+    with factory() as fresh:
+        persisted = fresh.get(GenerationJob, job_id)
+        assert persisted.status == "rejected"
+        assert persisted.artifacts["author_decision"] == "rejected"
+        assert "applied_revision_id" not in persisted.artifacts
+        assert fresh.get(Chapter, chapter_id).current_revision_id == base_id
+        revisions = fresh.scalars(select(Revision).where(Revision.chapter_id == chapter_id)).all()
+        assert len(revisions) == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_reject_cannot_override_committed_candidate_application(storage):
+    db, factory, user, novel, chapter = storage
+    job = job_for(db, user, novel, chapter)
+    await Pipeline(db, job, FakeProvider(), settings()).execute()
+    job_id, chapter_id, base_id = job.id, chapter.id, job.base_revision_id
+    with factory() as stale_db:
+        stale_job = stale_db.get(GenerationJob, job_id)
+        assert stale_job.status == "awaiting_author"
+        applied = apply_job(job_id, ApplyJob(base_revision_id=base_id, mutation_id=str(uuid4())), db=db, user=user)
+        applied_id = applied["revision"]["id"]
+        assert applied["job"]["status"] == "applied"
+        assert stale_job.status == "awaiting_author"
+        with pytest.raises(HTTPException) as error:
+            reject_job(job_id, db=stale_db, user=user)
+        assert error.value.status_code == 409
+    with factory() as fresh:
+        persisted = fresh.get(GenerationJob, job_id)
+        assert persisted.status == "applied"
+        assert persisted.artifacts["author_decision"] == "accepted"
+        assert persisted.artifacts["applied_revision_id"] == applied_id
+        assert fresh.get(Chapter, chapter_id).current_revision_id == applied_id
+        revisions = fresh.scalars(select(Revision).where(Revision.chapter_id == chapter_id)).all()
+        assert len(revisions) == 2

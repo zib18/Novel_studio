@@ -1,6 +1,6 @@
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {api,ApiError,errorMessage,post} from './api';
-import {editDraft,getCache,getDraft,initialiseDraft,listBackups,markConflict,putCache,resolveConflict,syncDraft,type Draft} from './drafts';
+import {editDraft,getCache,getDraft,initialiseDraft,listBackups,markConflict,putCache,resolveConflict,syncDraft,waitForDraftSync,type Draft} from './drafts';
 import {Badge,Compare,Empty,labelStatus,Modal} from './components';
 import type {Chapter,Finding,Job,Novel,Page,Revision,ServerState,User} from './types';
 const terminal=new Set(['awaiting_author','needs_author_review','failed','cancelled','applied','rejected']);
@@ -16,8 +16,9 @@ export function Editor({user,novel,notify}:{user:User;novel:Novel;notify:(s:stri
  const [criticalConfirmed,setCriticalConfirmed]=useState(false),[historyOpen,setHistoryOpen]=useState(false),[revisions,setRevisions]=useState<Revision[]>([]),[comparison,setComparison]=useState<Revision|null>(null),[backups,setBackups]=useState<Draft[]>([]),[conflictOpen,setConflictOpen]=useState(false);
  const editor=useRef({chapterId:'',text:''}),pendingWrites=useRef<Promise<unknown>>(Promise.resolve());
  const [transitionBusy,setTransitionBusy]=useState(false),editingFrozen=useRef(false);
- const freezeEditing=()=>{editingFrozen.current=true;setTransitionBusy(true);};
- const thawEditing=()=>{editingFrozen.current=false;setTransitionBusy(false);};
+ const transitionDone=useRef<Promise<void>>(Promise.resolve()),finishTransition=useRef<(()=>void)|null>(null);
+ const freezeEditing=()=>{editingFrozen.current=true;transitionDone.current=new Promise<void>(resolve=>{finishTransition.current=resolve;});setTransitionBusy(true);};
+ const thawEditing=()=>{editingFrozen.current=false;finishTransition.current?.();finishTransition.current=null;setTransitionBusy(false);};
  const notifyError=useCallback((e:unknown)=>notify(errorMessage(e)),[notify]);
  useEffect(()=>{
   if(!chapterId)return;setLock('pending');if(!navigator.locks){setLock('unsupported');return;}
@@ -25,7 +26,10 @@ export function Editor({user,novel,notify}:{user:User;novel:Novel;notify:(s:stri
   void navigator.locks.request('novel-studio-editor:'+user.id+':'+chapterId,{ifAvailable:true},async acquired=>{
    if(cancelled)return;if(!acquired){setLock('blocked');return;}setLock('owned');await new Promise<void>(resolve=>{release=resolve;if(cancelled)resolve();});
   }).catch(()=>{if(!cancelled)setLock('unsupported');});
-  return()=>{cancelled=true;release?.();};
+  return()=>{cancelled=true;
+   void Promise.allSettled([pendingWrites.current,transitionDone.current])
+    .then(()=>waitForDraftSync(user.id,chapterId)).finally(()=>release?.());
+  };
  },[chapterId,user.id]);
  const loadChapters=useCallback(async(append=false,offset=0)=>{
  const cacheKey='chapters:'+novel.id;

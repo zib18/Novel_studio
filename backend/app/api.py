@@ -185,6 +185,8 @@ def approve_chapter(chapter_id: str, body: ChapterApproval, db: Session = Depend
     revision = db.get(Revision, body.base_revision_id)
     if not revision or revision.chapter_id != chapter.id or not revision.text.strip():
         fail(422, "empty_chapter", "Нельзя утвердить пустую или чужую редакцию")
+    db.execute(update(Novel).where(Novel.id == chapter.novel_id)
+               .values(canon_version=Novel.canon_version + 1, updated_at=utcnow()))
     changed = db.execute(update(Chapter).where(
         Chapter.id == chapter.id, Chapter.current_revision_id == body.base_revision_id
     ).values(status="APPROVED", approved_revision_id=body.base_revision_id)
@@ -192,8 +194,6 @@ def approve_chapter(chapter_id: str, body: ChapterApproval, db: Session = Depend
     if changed != 1:
         db.rollback()
         fail(409, "revision_conflict", "Перед утверждением загрузите последнюю редакцию")
-    db.execute(update(Novel).where(Novel.id == chapter.novel_id)
-               .values(canon_version=Novel.canon_version + 1, updated_at=utcnow()))
     db.add(AuthorDecision(novel_id=chapter.novel_id, user_id=user.id, chapter_id=chapter.id,
                           action="approve_chapter", payload={"revision_id": body.base_revision_id}))
     db.commit()
