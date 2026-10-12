@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from app.database import Base
-from app.models import User, Novel, Chapter, Revision
+from app.models import User, Novel, Chapter, Revision, RejectRule, AuthorDecision
 from app.services import save_revision, payload_hash
 from app.generation.api import apply_job, reject_job
 from app.generation.context import safe_entry
@@ -438,3 +438,33 @@ async def test_stale_reject_cannot_override_committed_candidate_application(stor
         assert fresh.get(Chapter, chapter_id).current_revision_id == applied_id
         revisions = fresh.scalars(select(Revision).where(Revision.chapter_id == chapter_id)).all()
         assert len(revisions) == 2
+
+
+@pytest.mark.asyncio
+async def test_rejected_error_recurrence_is_durable_and_escalates(storage):
+    db, _, user, novel, chapter = storage
+    decision = AuthorDecision(novel_id=novel.id, user_id=user.id, action="ban",
+                              reason="Прямой запрет автора", payload={})
+    db.add(decision)
+    db.flush()
+    rule = RejectRule(novel_id=novel.id, source_decision_id=decision.id,
+                      phrase="Уголок губ дрогнул", description="Запрещённый штамп",
+                      severity="warning")
+    db.add(rule)
+    db.commit()
+    def rejected_snapshot():
+        db.refresh(rule)
+        return [{"id": rule.id, "phrase": rule.phrase, "description": rule.description,
+                 "severity": rule.severity, "status": rule.status, "repeat_count": rule.repeat_count}]
+    first = job_for(db, user, novel, chapter, rejected=rejected_snapshot())
+    await Pipeline(db, first, FakeProvider(draft="Уголок губ дрогнул."), settings()).execute()
+    db.refresh(rule)
+    assert rule.repeat_count == 1
+    assert first.status == "awaiting_author"
+    second = job_for(db, user, novel, chapter, rejected=rejected_snapshot())
+    await Pipeline(db, second, FakeProvider(draft="Уголок губ дрогнул."), settings()).execute()
+    db.refresh(rule)
+    assert rule.repeat_count == 2
+    assert second.status == "needs_author_review"
+    assert all(f["severity"] == "critical" for f in second.artifacts["findings"])
+    assert len(second.artifacts["history"]) == 3

@@ -105,7 +105,7 @@ def main():
                 second.goto(origin, wait_until="networkidle")
                 open_chapter(second, novel_id, chapter_id)
                 expect(second.get_by_test_id("chapter-editor")).not_to_be_editable()
-                page.get_by_role("button", name="Библиотека", exact=True).click()
+                page.get_by_role("button", name="Библиотека").click()
                 second.reload(wait_until="networkidle")
                 open_chapter(second, novel_id, chapter_id)
                 expect(second.get_by_test_id("chapter-editor")).to_be_editable()
