@@ -55,7 +55,7 @@ def make_snapshot(db, novel, chapter, instructions: str, context_limit: int) -> 
     terms = set(re.findall(r"\w{4,}", instructions.casefold()))
     safe = [e for e in entries if safe_entry(e, chapter.number)]
     safe.sort(key=lambda e: (
-        e["kind"] in ("current_state", "novel_core", "character", "knowledge"),
+        e["kind"] in ("current_state", "core", "novel_core", "character", "knowledge"),
         len(terms.intersection(re.findall(r"\w{4,}", (e["title"] + " " + e["content"]).casefold())))
     ), reverse=True)
     chosen, chars = [], 0
@@ -71,13 +71,14 @@ def make_snapshot(db, novel, chapter, instructions: str, context_limit: int) -> 
                            Chapter.number < chapter.number,
                            Chapter.approved_revision_id.is_not(None))
                            .order_by(Chapter.number.desc()).limit(3)).all()
-    for c in reversed(preceding):
+    for c in preceding:
         rev = db.get(Revision, c.approved_revision_id)
         if rev:
             allowance = max(0, min(context_limit // 4, context_limit - chars))
             recent.append({"number": c.number, "text": rev.text[-allowance:] if allowance else "",
                            "truncated": len(rev.text) > allowance})
             chars += min(len(rev.text), allowance)
+    recent.reverse()
     current = db.get(Revision, chapter.current_revision_id) if chapter.current_revision_id else None
     removed = []
     for r in db.scalars(select(Revision).where(Revision.chapter_id == chapter.id)

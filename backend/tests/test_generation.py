@@ -7,10 +7,10 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from app.database import Base
-from app.models import User, Novel, Chapter, Revision, RejectRule, AuthorDecision
+from app.models import User, Novel, Chapter, Revision, RejectRule, AuthorDecision, BibleEntry
 from app.services import save_revision, payload_hash
 from app.generation.api import apply_job, reject_job
-from app.generation.context import safe_entry
+from app.generation.context import safe_entry, make_snapshot
 from app.generation.models import GenerationJob, UsageLedger
 from app.generation.pipeline import Pipeline, LeaseLost, validate_report
 from app.generation.provider import ProviderResult
@@ -507,3 +507,31 @@ def test_agent_citations_cannot_reactivate_unapproved_or_resolved_rules(entry):
         bible=entry["bible"], rejected=entry["rejected"]), "continuity")
     assert not checked.complete
     assert checked.findings == []
+
+
+def test_context_prioritizes_latest_approved_chapter_with_large_bible(storage):
+    db, _, user, novel, first = storage
+    latest_text = ""
+    for number in range(1, 4):
+        chapter = first if number == 1 else Chapter(novel_id=novel.id, number=number, title=f"Глава {number}")
+        if number != 1:
+            db.add(chapter)
+            db.flush()
+        text = f"События главы {number}: " + ("текст " * 1600)
+        revision = Revision(id=str(uuid4()), chapter_id=chapter.id, text=text, source="manual",
+                            mutation_id=str(uuid4()), payload_hash=payload_hash(None, text))
+        db.add(revision)
+        db.flush()
+        chapter.current_revision_id = revision.id
+        chapter.approved_revision_id = revision.id
+        chapter.status = "APPROVED"
+        latest_text = text
+    db.add(BibleEntry(novel_id=novel.id, kind="core", title="Большая библия",
+                      content="ф" * 23500, status="CANON", active=True, details={}))
+    current = Chapter(novel_id=novel.id, number=4, title="Продолжение")
+    db.add(current)
+    db.commit()
+    context = make_snapshot(db, novel, current, "Продолжить историю.", 40000)["writer_context"]
+    assert context["recent_chapters"][-1]["number"] == 3
+    assert context["recent_chapters"][-1]["text"] == latest_text
+    assert not context["recent_chapters"][-1]["truncated"]
