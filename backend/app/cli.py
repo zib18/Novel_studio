@@ -1,3 +1,4 @@
+from contextlib import closing
 """python -m app.cli migrate | create-user | reset-password | backup"""
 import argparse
 import getpass
@@ -58,8 +59,9 @@ def backup(settings, output=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".partial")
     try:
-        with sqlite3.connect(str(source)) as original, sqlite3.connect(str(temporary)) as destination:
+        with closing(sqlite3.connect(str(source))) as original, closing(sqlite3.connect(str(temporary))) as destination:
             original.backup(destination)
+            destination.execute("PRAGMA journal_mode=DELETE")
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
