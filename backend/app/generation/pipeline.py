@@ -214,6 +214,8 @@ class Pipeline:
         artifacts = deepcopy(self.job.artifacts)
         artifacts["plan"] = serialize(plan) if plan else None
         artifacts["draft_text"] = draft
+        if self.job.kind == "write":
+            artifacts["writer_proposals"] = text_result.proposals
         self.save(artifacts=artifacts)
         text = artifacts.get("revised_text", draft)
         for index in range(self.job.max_review_passes):
@@ -242,13 +244,20 @@ class Pipeline:
                 finding.id = hashlib.sha256((finding.rule_id + "\0" + finding.quote).encode()).hexdigest()[:20]
                 if pass_no > 1 and finding.rule_id.startswith("reject:"):
                     finding.severity = "critical"
-            findings = list({(f.rule_id, f.quote): f for f in findings}.values())
+            strongest = {}
+            severity_rank = {"warning": 1, "error": 2, "critical": 3}
+            for finding in findings:
+                key = (finding.rule_id, finding.quote)
+                existing = strongest.get(key)
+                if existing is None or severity_rank[finding.severity] > severity_rank[existing.severity]:
+                    strongest[key] = finding
+            findings = list(strongest.values())
             complete = continuity.complete and literary.complete and guardian_complete
             limitations = continuity.limitations + literary.limitations
             if not snapshot["context_complete"] or not guardian_complete:
                 limitations.append("Контекст ограничен: включены только релевантные факты и последние главы; "
                                    "литеральные запреты проверены по всему снимку.")
-            blocking = any(f.severity in ("critical", "error") for f in findings)
+            blocking = any(f.severity in ("critical", "error") or f.rule_id.startswith("reject:") for f in findings)
             artifacts = deepcopy(self.job.artifacts)
             artifacts["revised_text"] = text
             registered = set(artifacts.get("registered_rejects", []))
@@ -265,6 +274,11 @@ class Pipeline:
             artifacts["check_complete"] = complete
             artifacts["limitations"] = limitations
             history = artifacts.setdefault("history", [])
+            current_ids = {finding.id for finding in findings}
+            for previous_pass in history:
+                for previous in previous_pass.get("findings", []):
+                    if previous.get("status") != "rejected":
+                        previous["status"] = "open" if previous["id"] in current_ids else "fixed"
             record = {"pass": pass_no, "text": text, "findings": artifacts["findings"],
                       "check_complete": complete, "limitations": limitations}
             if len(history) >= pass_no:

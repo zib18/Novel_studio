@@ -328,6 +328,7 @@ async def test_correction_rechecks_and_preserves_original(storage):
     assert job.review_passes == 2
     assert job.artifacts["draft_text"] == "Запретная фраза."
     assert job.artifacts["revised_text"] == "Елена выбрала другой ответ."
+    assert job.artifacts["history"][0]["findings"][0]["status"] == "fixed"
     assert job.artifacts["findings"] == []
     assert provider.calls.count("continuity") == 2
     assert provider.calls.count("literary_editor") == 2
@@ -460,7 +461,8 @@ async def test_rejected_error_recurrence_is_durable_and_escalates(storage):
     await Pipeline(db, first, FakeProvider(draft="Уголок губ дрогнул."), settings()).execute()
     db.refresh(rule)
     assert rule.repeat_count == 1
-    assert first.status == "awaiting_author"
+    assert first.status == "needs_author_review"
+    assert first.artifacts["history"][0]["findings"][0]["severity"] == "warning"
     second = job_for(db, user, novel, chapter, rejected=rejected_snapshot())
     await Pipeline(db, second, FakeProvider(draft="Уголок губ дрогнул."), settings()).execute()
     db.refresh(rule)
@@ -468,3 +470,26 @@ async def test_rejected_error_recurrence_is_durable_and_escalates(storage):
     assert second.status == "needs_author_review"
     assert all(f["severity"] == "critical" for f in second.artifacts["findings"])
     assert len(second.artifacts["history"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_agent_cannot_downgrade_machine_future_violation(storage):
+    db, _, user, novel, chapter = storage
+    class SoftReviewer(FakeProvider):
+        async def call(self, name, rules, payload, output_type, max_output_tokens):
+            result = await super().call(name, rules, payload, output_type, max_output_tokens)
+            if name == "continuity":
+                result.output = ReviewResult(complete=True, limitations=[], findings=[Finding(
+                    id="soft", category="continuity.future", severity="warning",
+                    quote="завещание подделано", explanation="Мягкое суждение проверяющего",
+                    suggestion="Уточнить", rule_id="bible:secret")])
+            return result
+    job = job_for(db, user, novel, chapter, bible=[{
+        "id": "secret", "kind": "future_vault", "title": "Тайна", "content": "Поддельное завещание",
+        "status": "FUTURE_CANON", "active": True, "available_from_chapter": 5,
+        "details": {"reveal_markers": ["завещание подделано"]},
+    }])
+    await Pipeline(db, job, SoftReviewer(draft="Она узнала: завещание подделано."), settings()).execute()
+    assert job.status == "needs_author_review"
+    assert job.artifacts["history"][0]["findings"][0]["severity"] == "critical"
+    assert all(f["severity"] == "critical" for f in job.artifacts["findings"])
