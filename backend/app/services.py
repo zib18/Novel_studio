@@ -182,6 +182,14 @@ def confirm_entry(db, entry, novel, user, decision):
         old_name = old_name if isinstance(old_name, str) and old_name.strip() else old.title
         new_name = new_name if isinstance(new_name, str) and new_name.strip() else entry.title
         if old_name.strip().casefold() != new_name.strip().casefold():
+            generated = db.scalars(select(RejectRule).where(
+                RejectRule.novel_id == novel.id, RejectRule.status == "ACTIVE",
+                RejectRule.source_decision_id.in_(select(AuthorDecision.id).where(
+                    AuthorDecision.novel_id == novel.id, AuthorDecision.action == "approve"))
+            ))
+            for prior in generated:
+                if prior.phrase.strip().casefold() == new_name.strip().casefold():
+                    prior.status = "RESOLVED"
             db.add(RejectRule(novel_id=novel.id, phrase=old_name,
                               description=f"Автор заменил имя «{old_name}» на «{new_name}»",
                               source_decision_id=audit.id, severity="critical"))

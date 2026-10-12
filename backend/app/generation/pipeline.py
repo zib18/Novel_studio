@@ -32,8 +32,12 @@ class BudgetExceeded(Exception):
 
 
 def validate_report(report: ReviewResult, text: str, snapshot: dict, role: str) -> ReviewResult:
-    ids = {"bible:" + e["id"] for e in snapshot["bible"]}
-    ids |= {"reject:" + r["id"] for r in snapshot["rejected"]}
+    ids = {"bible:" + e["id"] for e in snapshot["bible"]
+           if e.get("active") is not False and
+           str(e.get("status", "")).upper().replace(" ", "_") in ("CANON", "FACT", "FUTURE_CANON")}
+    ids |= {"reject:" + r["id"] for r in snapshot["rejected"]
+            if r.get("active") is not False and str(r.get("status", "ACTIVE")).upper()
+            not in ("RESOLVED", "INACTIVE", "DISABLED", "REVOKED", "DELETED")}
     ids |= EDITOR_RULES | {"manual.removal"}
     valid, invalid = [], []
     for finding in report.findings:

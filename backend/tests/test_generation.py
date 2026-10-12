@@ -493,3 +493,17 @@ async def test_agent_cannot_downgrade_machine_future_violation(storage):
     assert job.status == "needs_author_review"
     assert job.artifacts["history"][0]["findings"][0]["severity"] == "critical"
     assert all(f["severity"] == "critical" for f in job.artifacts["findings"])
+
+
+@pytest.mark.parametrize("entry", [
+    {"bible": [{"id": "proposal", "status": "PROPOSAL", "active": True}], "rejected": [], "rule": "bible:proposal"},
+    {"bible": [], "rejected": [{"id": "resolved", "status": "RESOLVED"}], "rule": "reject:resolved"},
+])
+def test_agent_citations_cannot_reactivate_unapproved_or_resolved_rules(entry):
+    report = ReviewResult(complete=True, limitations=[], findings=[Finding(
+        id="wrong", category="continuity", severity="critical", quote="Анна вошла.",
+        explanation="Неверный статус источника", suggestion="Изменить", rule_id=entry["rule"])])
+    checked = validate_report(report, "Анна вошла.", snapshot(
+        bible=entry["bible"], rejected=entry["rejected"]), "continuity")
+    assert not checked.complete
+    assert checked.findings == []

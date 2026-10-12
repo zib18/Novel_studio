@@ -315,3 +315,22 @@ def test_large_repetitive_deletions_use_bounded_diff_and_capture_short_reply(mon
         assert services.deleted_fragments(prefix + removed + suffix, prefix + suffix) == [removed]
     assert services.deleted_fragments("Я не уйду", "") == ["Я не уйду"]
     assert services.deleted_fragments("домохозяйка", "") == []
+
+
+def test_latest_author_name_reversal_retires_automatically_generated_ban(studio):
+    _, client, _ = studio
+    work = novel(client)
+    first = idea(client, work["id"], title="Анна", details={"name": "Анна"})
+    alpha = decide(client, first, 1).json()["entry"]
+    beta = client.post(P + f"/bible/{alpha['id']}/replacement", json={
+        "base_version": alpha["version"], "title": "Марина",
+        "content": "Теперь героиню зовут Марина.", "details": {"name": "Марина"}}).json()
+    beta = decide(client, beta, 2).json()["entry"]
+    restored = client.post(P + f"/bible/{beta['id']}/replacement", json={
+        "base_version": beta["version"], "title": "Анна",
+        "content": "Последнее решение автора: героиню вновь зовут Анна.", "details": {"name": "Анна"}}).json()
+    result = decide(client, restored, 3)
+    assert result.status_code == 200
+    rules = client.get(P + f"/novels/{work['id']}/rejections").json()["items"]
+    assert next(rule for rule in rules if rule["phrase"] == "Анна")["status"] == "RESOLVED"
+    assert next(rule for rule in rules if rule["phrase"] == "Марина")["status"] == "ACTIVE"
