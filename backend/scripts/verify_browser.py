@@ -1,4 +1,5 @@
 """End-to-end editor checks using actual FastAPI, Chromium and IndexedDB."""
+import base64
 from pathlib import Path
 import tempfile
 import time
@@ -68,7 +69,8 @@ def main():
                 chapters = page.request.get(f"{origin}/api/v1/novels/{novel_id}/chapters").json()["items"]
                 chapter_id = next(c["id"] for c in chapters if c["title"] == CHAPTER_TITLE)
                 wait_saved(page, origin, chapter_id, ORIGINAL)
-                page.screenshot(path=str(ARTIFACTS / "desktop-editor.png"), full_page=True)
+                preview = page.screenshot(path=str(ARTIFACTS / "desktop-editor.png"), full_page=True)
+                print("DESKTOP_PREVIEW_BASE64=" + base64.b64encode(preview).decode())
 
                 mobile = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
                 phone = mobile.new_page()
@@ -78,7 +80,9 @@ def main():
                 expect(phone.get_by_test_id("chapter-editor")).to_be_editable()
                 phone.get_by_test_id("chapter-editor").fill(MOBILE_EDIT)
                 wait_saved(phone, origin, chapter_id, MOBILE_EDIT)
-                phone.screenshot(path=str(ARTIFACTS / "mobile-editor.png"), full_page=True)
+                preview = phone.screenshot(path=str(ARTIFACTS / "mobile-editor.png"), full_page=True)
+                print("MOBILE_PREVIEW_BASE64=" + base64.b64encode(preview).decode())
+                assert phone.evaluate("document.body.scrollWidth <= window.innerWidth + 1"), "Mobile layout overflows horizontally"
                 mobile.close()
 
                 page.reload(wait_until="networkidle")
@@ -96,7 +100,48 @@ def main():
                 page.screenshot(path=str(ARTIFACTS / "offline-draft.png"), full_page=True)
                 desktop.set_offline(False)
                 wait_saved(page, origin, chapter_id, OFFLINE_EDIT)
-                print("Browser passed: desktop edit, mobile synchronization, offline reload and reconnect.")
+                # Same-profile tabs share IndexedDB and must respect the chapter lock.
+                second = desktop.new_page()
+                second.goto(origin, wait_until="networkidle")
+                open_chapter(second, novel_id, chapter_id)
+                expect(second.get_by_test_id("chapter-editor")).not_to_be_editable()
+                page.get_by_role("button", name="Библиотека", exact=True).click()
+                second.reload(wait_until="networkidle")
+                open_chapter(second, novel_id, chapter_id)
+                expect(second.get_by_test_id("chapter-editor")).to_be_editable()
+                second.close()
+
+                # Cached pagination must preserve opened chapters beyond the first 100.
+                session = page.request.get(origin + "/api/v1/session").json()
+                headers = {"Origin": origin, "X-CSRF-Token": session["csrf_token"]}
+                late_id = ""
+                for number in range(2, 102):
+                    result = page.request.post(
+                        f"{origin}/api/v1/novels/{novel_id}/chapters",
+                        data={"number": number, "title": f"Глава {number}"}, headers=headers)
+                    assert result.status == 201, result.text()
+                    late_id = result.json()["id"]
+                page.get_by_test_id(f"novel-open-{novel_id}").click()
+                page.get_by_role("button", name="Загрузить ещё", exact=True).click()
+                page.get_by_test_id(f"chapter-open-{late_id}").click()
+                later_text = "Глава за пределами первой страницы: авторский текст сохранён."
+                expect(page.get_by_test_id("chapter-editor")).to_be_editable()
+                page.get_by_test_id("chapter-editor").fill(later_text)
+                wait_saved(page, origin, late_id, later_text)
+                desktop.set_offline(True)
+                page.reload(wait_until="domcontentloaded")
+                page.get_by_test_id(f"novel-open-{novel_id}").click()
+                expect(page.get_by_test_id(f"chapter-open-{late_id}")).to_be_visible()
+                expect(page.get_by_test_id("chapter-editor")).to_have_value(later_text)
+                late_offline = later_text + "\\nПравка главы 101 без сети."
+                page.get_by_test_id("chapter-editor").fill(late_offline)
+                page.wait_for_timeout(1200)
+                page.reload(wait_until="domcontentloaded")
+                page.get_by_test_id(f"novel-open-{novel_id}").click()
+                expect(page.get_by_test_id("chapter-editor")).to_have_value(late_offline)
+                desktop.set_offline(False)
+                wait_saved(page, origin, late_id, late_offline)
+                print("Browser passed: desktop/mobile sync, offline reload/reconnect, two-tab locks and chapter 101 offline.")
             except Exception:
                 page.screenshot(path=str(ARTIFACTS / "failure.png"), full_page=True)
                 raise

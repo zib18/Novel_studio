@@ -27,6 +27,7 @@ export function Editor({user,novel,notify}:{user:User;novel:Novel;notify:(s:stri
    if(cancelled)return;if(!acquired){setLock('blocked');return;}setLock('owned');await new Promise<void>(resolve=>{release=resolve;if(cancelled)resolve();});
   }).catch(()=>{if(!cancelled)setLock('unsupported');});
   return()=>{cancelled=true;
+   if(editor.current.chapterId===chapterId)editor.current={chapterId:'',text:''};
    void Promise.allSettled([pendingWrites.current,transitionDone.current])
     .then(()=>waitForDraftSync(user.id,chapterId)).finally(()=>release?.());
   };
@@ -57,7 +58,7 @@ export function Editor({user,novel,notify}:{user:User;novel:Novel;notify:(s:stri
   void api<Page<Job>>('/novels/'+novel.id+'/jobs').then(page=>{setJobs(page.items);setJob(page.items.find(j=>!terminal.has(j.status))??page.items[0]??null);}).catch(()=>{});
  },[loadChapters,novel.id,notifyError]);
  useEffect(()=>{
-  if(!chapterId)return;let cancelled=false;setChapter(null);setDraft(null);setText('');editor.current={chapterId,text:''};
+  if(!chapterId)return;let cancelled=false;setChapter(null);setDraft(null);setText('');setSaving(false);setPersisting(false);editor.current={chapterId,text:''};
   const load=async()=>{try{
    const detail=await api<Chapter>('/chapters/'+chapterId);if(!detail.current_revision)throw new Error('Сервер не вернул текст главы.');
    const local=await initialiseDraft(user.id,detail,detail.current_revision);if(cancelled)return;
@@ -89,7 +90,7 @@ export function Editor({user,novel,notify}:{user:User;novel:Novel;notify:(s:stri
   return()=>{stopped=true;window.clearInterval(interval);};
  },[job?.id,job?.status,notifyError]);
  const onText=(value:string)=>{
-  if(lock!=='owned'||editingFrozen.current)return;const epoch=++editEpoch.current;setPersisting(true);setText(value);editor.current={chapterId,text:value};setDraft(current=>current?{...current,text:value,state:current.state==='conflict'?'conflict':'local'}:current);const id=chapterId;
+  if(lock!=='owned'||editingFrozen.current||draft?.chapterId!==chapterId||editor.current.chapterId!==chapterId)return;const epoch=++editEpoch.current;setPersisting(true);setText(value);editor.current={chapterId,text:value};setDraft(current=>current?{...current,text:value,state:current.state==='conflict'?'conflict':'local'}:current);const id=chapterId;
   pendingWrites.current=pendingWrites.current.catch(()=>undefined).then(()=>editDraft(user.id,id,value)).then(result=>{if(epoch===editEpoch.current)setPersisting(false);return result;}).catch(error=>{notify('Не удалось сохранить текст на устройстве. Не закрывайте редактор: '+errorMessage(error));throw error;});void pendingWrites.current.catch(()=>{});
  };
  const createChapter=async(e:React.FormEvent)=>{
@@ -131,7 +132,7 @@ export function Editor({user,novel,notify}:{user:User;novel:Novel;notify:(s:stri
  const chooseConflict=async(server:boolean)=>{
   if(!draft?.serverRevision){notify('Серверная версия недоступна. Восстановите связь и повторите сохранение.');return;}
   if(editingFrozen.current)return;freezeEditing();
-  try{await pendingWrites.current;const next=await resolveConflict(user.id,chapterId,server?draft.serverRevision.text:editor.current.text,draft.serverRevision);setDraft(next);setText(next.text);editor.current.text=next.text;setConflictOpen(false);if(!server)await save();}catch(error){notifyError(error);}finally{thawEditing();}
+  try{await pendingWrites.current;const next=await resolveConflict(user.id,chapterId,server?draft.serverRevision.text:editor.current.text,draft.serverRevision);if(editor.current.chapterId!==chapterId){notify('Решение сохранено для прежней главы.');return;}setDraft(next);setText(next.text);editor.current.text=next.text;setConflictOpen(false);if(!server)await save();}catch(error){notifyError(error);}finally{thawEditing();}
  };
  const approve=async()=>{
   if(!window.confirm('Утвердить эту редакцию главы? Утверждение текста само по себе не утверждает новые записи канона.'))return;
@@ -145,7 +146,7 @@ export function Editor({user,novel,notify}:{user:User;novel:Novel;notify:(s:stri
  <header className="manuscript-heading"><div><span className="eyebrow">ГЛАВА {chapter?.number??''}</span><h1>{chapter?.title??'Рукопись'}</h1></div><div className="editor-tools"><button className="ghost" onClick={()=>void openHistory()}>История</button><button className="ghost" disabled={lock!=='owned'} onClick={()=>void approve()}>Утвердить</button><button onClick={()=>void save().catch(notifyError)} disabled={saving||lock!=='owned'}>{saving?'Сохраняем…':'Сохранить'}</button></div></header>
  {lock!=='owned'&&<div className="notice warning">{lock==='blocked'?'Глава уже редактируется в другой вкладке. Закройте её и откройте главу снова.':lock==='unsupported'?'Для безопасного редактирования нужен современный Chrome, Edge или Firefox и HTTPS (либо localhost).':'Подготавливаем безопасное редактирование…'}</div>}
  {draft.state==='conflict'&&<div className="notice warning">Есть конфликт редакций. Ваш текст сохранён на устройстве.<button onClick={()=>setConflictOpen(true)}>Сравнить</button></div>}
- <textarea className="prose-editor" aria-label="Текст главы" data-testid="chapter-editor" spellCheck readOnly={lock!=='owned'||transitionBusy} value={text} onChange={e=>onText(e.target.value)} placeholder="Начните писать. Здесь можно свободно редактировать текст — ИИ не заменит ваши правки без принятия новой редакции." />
+ <textarea className="prose-editor" aria-label="Текст главы" data-testid="chapter-editor" spellCheck readOnly={lock!=='owned'||transitionBusy||draft.chapterId!==chapterId} value={text} onChange={e=>onText(e.target.value)} placeholder="Начните писать. Здесь можно свободно редактировать текст — ИИ не заменит ваши правки без принятия новой редакции." />
  <footer className="editor-status"><span>{text.length.toLocaleString('ru-RU')} знаков с пробелами</span><span className={draft.state==='synced'?'success':''}>{persisting?'Сохраняем на устройстве…':saving?'Синхронизация…':draft.state==='synced'?'✓ Синхронизировано':draft.state==='conflict'?'Конфликт · текст на устройстве':'Сохранено на устройстве'}</span></footer></>}</section>
  <aside className="assistant-panel"><header><span className="eyebrow">СОАВТОР ПОД ВАШИМ КОНТРОЛЕМ</span><h2>Мастерская главы</h2></header><label>Что должно произойти?<textarea rows={5} value={instructions} onChange={e=>setInstructions(e.target.value)} placeholder="Опишите события, настроение и ограничения свободными словами." /></label>
  <label className="inline-label">Редакторских проходов<input type="number" min={1} max={10} value={passes} onChange={e=>setPasses(Math.max(1,Math.min(10,Number(e.target.value))))} /></label>
@@ -162,7 +163,7 @@ export function Editor({user,novel,notify}:{user:User;novel:Novel;notify:(s:stri
  </aside>
  {conflictOpen&&draft&&<Modal title="Сравнение редакций" onClose={()=>setConflictOpen(false)}><p>На сервере появился другой текст. Выберите версию явно; текущий локальный вариант сохранится в резервной истории.</p>{draft.serverRevision?<Compare left={draft.serverRevision.text} right={text} />:<p className="warning-text">Для загрузки серверной версии восстановите связь и нажмите «Сохранить».</p>}<div className="actions"><button disabled={!draft.serverRevision||lock!=='owned'} onClick={()=>void chooseConflict(true)}>Использовать серверную</button><button className="primary" disabled={!draft.serverRevision||lock!=='owned'} onClick={()=>void chooseConflict(false)}>Сохранить мой текст поверх серверной</button></div><p className="small muted">Для ручного объединения закройте окно, отредактируйте свой текст и снова откройте сравнение.</p></Modal>}
  {historyOpen&&<Modal title="История главы" onClose={()=>{setHistoryOpen(false);setComparison(null);}}><div className="history-list">{revisions.map(r=><div key={r.id}><span>{r.created_at?new Date(r.created_at).toLocaleString('ru-RU'):r.id.slice(0,8)} · {r.source??'редакция'}</span><button onClick={()=>void api<Revision>('/revisions/'+r.id).then(setComparison).catch(notifyError)}>Сравнить</button></div>)}</div>{comparison&&<><Compare left={comparison.text} right={text} leftTitle="Выбранная редакция" rightTitle="Текущий текст" /><button disabled={lock!=='owned'} onClick={()=>void restore(comparison)}>Восстановить выбранную редакцию</button></>}
- {backups.length>0&&<details><summary>Локальные версии до разрешения конфликтов ({backups.length})</summary>{backups.map((b,i)=><div key={i} className="backup"><p>{new Date(b.modifiedAt).toLocaleString('ru-RU')}</p><details><summary>Посмотреть текст</summary><pre>{b.text}</pre></details><button disabled={lock!=='owned'} onClick={()=>{if(window.confirm('Поместить этот локальный вариант в редактор? Текущий текст сначала сохраняется.'))void save().then(()=>{onText(b.text);setHistoryOpen(false);}).catch(notifyError);}}>Вернуть в редактор</button></div>)}</details>}</Modal>}
+ {backups.length>0&&<details><summary>Локальные версии до разрешения конфликтов ({backups.length})</summary>{backups.map((b,i)=><div key={i} className="backup"><p>{new Date(b.modifiedAt).toLocaleString('ru-RU')}</p><details><summary>Посмотреть текст</summary><pre>{b.text}</pre></details><button disabled={lock!=='owned'} onClick={()=>{if(window.confirm('Поместить этот локальный вариант в редактор? Текущий текст сначала сохраняется.'))void save().then(()=>{if(editor.current.chapterId!==chapterId)return;onText(b.text);setHistoryOpen(false);}).catch(notifyError);}}>Вернуть в редактор</button></div>)}</details>}</Modal>}
  </div>;
 }
 function FindingList({findings}:{findings:Finding[]}){
