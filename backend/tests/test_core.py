@@ -297,3 +297,21 @@ def test_partial_settings_preserve_full_configuration_and_invalidate_context(stu
         "base_version": 2, "concept": "Последнее прямое решение автора.",
     })
     assert concept.status_code == 200 and concept.json()["canon_version"] == work["canon_version"] + 2
+
+
+def test_large_repetitive_deletions_use_bounded_diff_and_capture_short_reply(monkeypatch):
+    from app import services
+    before = ("Я не уйду. " * 50000)[:500000]
+    assert len(before) == 500000
+    def forbidden_unbounded_matcher(*args, **kwargs):
+        raise AssertionError("Large middle must not enter SequenceMatcher")
+    with monkeypatch.context() as limited:
+        limited.setattr(services.difflib, "SequenceMatcher", forbidden_unbounded_matcher)
+        assert services.deleted_fragments(before, "") == [before]
+        assert services.deleted_fragments(before, "Совсем новый текст.") == [before]
+        assert services.deleted_fragments(before, before) == []
+        removed = before[:490000]
+        prefix, suffix = "Сцена началась.\n", "\nСцена закончилась."
+        assert services.deleted_fragments(prefix + removed + suffix, prefix + suffix) == [removed]
+    assert services.deleted_fragments("Я не уйду", "") == ["Я не уйду"]
+    assert services.deleted_fragments("домохозяйка", "") == []

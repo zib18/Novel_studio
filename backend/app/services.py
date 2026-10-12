@@ -1,6 +1,7 @@
 import difflib
 import hashlib
 import json
+import re
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from .auth import fail
@@ -55,13 +56,44 @@ def payload_hash(base_id, text):
 
 
 def deleted_fragments(before, after):
-    fragments = []
-    for tag, start, stop, _, _ in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
-        fragment = before[start:stop]
-        if tag in ("delete", "replace") and len(fragment.strip()) >= 12:
-            fragments.append(fragment)
-    return fragments
+    """Linear trimming; detailed matching only for a middle up to 20k chars.
 
+    Large replacements conservatively retain the entire removed middle as a
+    constraint. Full immutable revisions are never truncated by this function.
+    """
+    if before == after:
+        return []
+    prefix = 0
+    common = min(len(before), len(after))
+    while prefix < common and before[prefix] == after[prefix]:
+        prefix += 1
+    end_before, end_after = len(before), len(after)
+    while (end_before > prefix and end_after > prefix
+           and before[end_before - 1] == after[end_after - 1]):
+        end_before -= 1
+        end_after -= 1
+    old_middle = before[prefix:end_before]
+    new_middle = after[prefix:end_after]
+    if not old_middle:
+        return []
+
+    def meaningful(fragment):
+        words = 0
+        for _ in re.finditer(r"[^\W\d_]+(?:[-’'][^\W\d_]+)*", fragment):
+            words += 1
+            if words >= 3:
+                return True
+        return words >= 2 and len(fragment.strip()) >= 12
+
+    if len(old_middle) + len(new_middle) > 20000:
+        return [old_middle] if meaningful(old_middle) else []
+    fragments = []
+    matcher = difflib.SequenceMatcher(None, old_middle, new_middle, autojunk=True)
+    for tag, start, stop, _, _ in matcher.get_opcodes():
+        fragment = old_middle[start:stop]
+        if tag in ("delete", "replace") and meaningful(fragment):
+            fragments.append(fragment)
+    return list(dict.fromkeys(fragments))
 
 def save_revision(db, chapter, base_revision_id, text, source, mutation_id, *, commit=True):
     digest = payload_hash(base_revision_id, text)
@@ -145,8 +177,10 @@ def confirm_entry(db, entry, novel, user, decision):
     db.add(audit)
     db.flush()
     if old and target in APPROVED and old.kind == "character":
-        old_name = old.details.get("name") or old.title
-        new_name = entry.details.get("name") or entry.title
+        old_name = old.details.get("name")
+        new_name = entry.details.get("name")
+        old_name = old_name if isinstance(old_name, str) and old_name.strip() else old.title
+        new_name = new_name if isinstance(new_name, str) and new_name.strip() else entry.title
         if old_name.strip().casefold() != new_name.strip().casefold():
             db.add(RejectRule(novel_id=novel.id, phrase=old_name,
                               description=f"Автор заменил имя «{old_name}» на «{new_name}»",
