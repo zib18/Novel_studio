@@ -33,7 +33,7 @@ def safe_entry(entry: dict, chapter_number: int) -> bool:
     if available is not None and available > chapter_number:
         return False
     try:
-        raw_known = entry.get("details", {}).get("known_from_chapter")
+        raw_known = entry.get("details", {}).get("known_from_chapter", available)
         known_from = int(raw_known) if raw_known is not None else None
     except (TypeError, ValueError, OverflowError):
         return False

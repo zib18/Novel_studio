@@ -1,0 +1,13 @@
+export interface User{id:string;email:string}
+export interface Session{user:User|null;csrf_token:string}
+export interface Page<T>{items:T[];total:number}
+export interface Novel{id:string;title:string;genre:string;concept:string;version:number;canon_version:number;settings:Record<string,unknown>}
+export interface Revision{id:string;text:string;chapter_id?:string;created_at?:string;source?:string;reason?:string}
+export interface Chapter{id:string;novel_id:string;title:string;number:number;status?:string;current_revision_id?:string;current_revision?:Revision|null}
+export type BibleStatus='CANON'|'FACT'|'IDEA'|'PROPOSAL'|'FUTURE_CANON'|'REJECTED'|'UNDEFINED';
+export interface BibleRecord{active?:boolean;id:string;kind:string;title:string;content:string;status:BibleStatus;version:number;details:Record<string,unknown>;available_from_chapter?:number|null}
+export interface Rejection{id:string;phrase:string;description:string;scope?:string;severity?:string}
+export interface Finding{category?:string;severity:string;quote?:string;explanation?:string;message?:string;suggestion?:string;replacement?:string;rule?:string;rule_id?:string;status?:string}
+export interface Job{id:string;chapter_id:string;kind:string;status:string;stage?:string;review_passes?:number;artifacts?:{draft_text?:string;revised_text?:string;findings?:Finding[];history?:unknown[];check_complete?:boolean;[key:string]:unknown};findings?:Finding[];usage?:Record<string,unknown>;errors?:unknown;error?:unknown;created_at?:string}
+export interface Prompt{agent:string;text:string;version:number}
+export interface ServerState{ai_configured:boolean;model?:string}
