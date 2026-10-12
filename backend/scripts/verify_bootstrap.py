@@ -87,8 +87,8 @@ def verify_server() -> None:
         expected = {
             "status": "ok",
             "service": "Novel Studio",
-            "version": "0.1.0",
-            "stage": "bootstrap",
+            "version": "0.2.0",
+            "stage": "core",
         }
         if payload != expected:
             raise RuntimeError(f"Неожиданный ответ API: {payload!r}")
