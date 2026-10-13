@@ -101,6 +101,7 @@ jobs:
           --health-retries 10
     env:
       NOVEL_TEST_DATABASE_URL: postgresql+psycopg://novel:novel@127.0.0.1:5432/novel
+      NOVEL_TRANSFER_TEST_DATABASE_URL: postgresql+psycopg://novel:novel@127.0.0.1:5432/novel
       NOVEL_OPENAI_API_KEY: ""
     steps:
       - uses: actions/checkout@v4
@@ -112,6 +113,9 @@ jobs:
       - run: python -m pip install -r backend/requirements.txt
       - name: Test real server against PostgreSQL
         run: python backend/scripts/verify_studio.py
+      - name: Test SQLite transfer into isolated PostgreSQL schemas
+        working-directory: backend
+        run: python -m pytest tests/test_transfer.py -q
   browser:
     name: Desktop and mobile browser workflow
     needs: frontend
@@ -141,3 +145,25 @@ jobs:
         with:
           name: browser-verification
           path: browser-artifacts
+
+  deployment:
+    name: Production container and trusted HTTPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate hosting Blueprint against official schema
+        run: |
+          python -m pip install PyYAML==6.0.3 jsonschema==4.26.0
+          python backend/scripts/verify_blueprint.py
+      - name: Test production deployment over HTTPS
+        run: python backend/scripts/verify_deployment.py
+      - name: Upload deployment logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-verification
+          path: deployment-artifacts

@@ -1,0 +1,69 @@
+name: novel-studio
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: novel
+      POSTGRES_USER: novel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 deploy/setup.py first}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U novel -d novel"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  api:
+    image: novel-studio:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment: &application_environment
+      NOVEL_DATABASE_URL: postgresql+psycopg://novel:${POSTGRES_PASSWORD:?Set database password}@db:5432/novel
+      NOVEL_PUBLIC_URL: https://${NOVEL_DOMAIN:?Set public hostname}
+      NOVEL_COOKIE_SECURE: "true"
+      NOVEL_OPENAI_API_KEY: ${NOVEL_OPENAI_API_KEY:-}
+      NOVEL_OPENAI_MODEL: ${NOVEL_OPENAI_MODEL:-gpt-4.1-mini}
+      NOVEL_AI_JOB_BUDGET_USD: ${NOVEL_AI_JOB_BUDGET_USD:-1}
+      NOVEL_AI_DAILY_BUDGET_USD: ${NOVEL_AI_DAILY_BUDGET_USD:-5}
+      PORT: "10000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10000/api/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+  worker:
+    image: novel-studio:local
+    restart: unless-stopped
+    profiles: ["ai"]
+    command: ["python", "/app/deploy/launch.py", "worker"]
+    environment: *application_environment
+    depends_on:
+      api:
+        condition: service_healthy
+  https:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      NOVEL_DOMAIN: ${NOVEL_DOMAIN:?Set public hostname}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
