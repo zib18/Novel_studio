@@ -39,3 +39,7 @@ android/local.properties
 # Система
 .DS_Store
 Thumbs.db
+
+# Deployment verification artifacts
+deployment-artifacts/
+*.dump

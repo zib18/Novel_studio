@@ -5,6 +5,8 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 from app.config import Settings
@@ -55,6 +57,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         # Liveness only: does not assert DB migration, API key or worker readiness.
         return {"status": "ok", "service": "Novel Studio", "version": VERSION, "stage": "core"}
+
+    @application.get("/api/ready")
+    def readiness():
+        # Checks database and both schema generations; no paid AI call.
+        try:
+            with engine.connect() as connection:
+                connection.execute(select(models.User.id).limit(1))
+                connection.execute(select(generation_models.GenerationJob.id).limit(1))
+        except SQLAlchemyError:
+            raise HTTPException(503, detail={"code": "database_not_ready"})
+        return {"status": "ready", "database": "ok", "ai_access_checked": False}
 
     @application.get("/api/v1/system/status")
     def system_status(user=Depends(get_current_user)):

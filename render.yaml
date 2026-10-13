@@ -1,0 +1,57 @@
+# Paid deployment. Review Render's total price before creating resources.
+services:
+  - type: web
+    name: novel-studio-web
+    runtime: docker
+    repo: https://github.com/zib18/Novel_studio.git
+    branch: novel-studio/deployment
+    region: frankfurt
+    plan: 0.5c-512mb
+    numInstances: 1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/ready
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: NOVEL_DATABASE_URL
+        fromDatabase:
+          name: novel-studio-db
+          property: connectionString
+      - key: NOVEL_COOKIE_SECURE
+        value: "true"
+      - key: NOVEL_OPENAI_API_KEY
+        sync: false
+      - key: NOVEL_AI_JOB_BUDGET_USD
+        value: "1"
+      - key: NOVEL_AI_DAILY_BUDGET_USD
+        value: "5"
+  - type: worker
+    name: novel-studio-worker
+    runtime: docker
+    repo: https://github.com/zib18/Novel_studio.git
+    branch: novel-studio/deployment
+    region: frankfurt
+    plan: 0.5c-512mb
+    numInstances: 1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python /app/deploy/launch.py worker
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: NOVEL_DATABASE_URL
+        fromDatabase:
+          name: novel-studio-db
+          property: connectionString
+      - key: NOVEL_OPENAI_API_KEY
+        sync: false
+      - key: NOVEL_AI_JOB_BUDGET_USD
+        value: "1"
+      - key: NOVEL_AI_DAILY_BUDGET_USD
+        value: "5"
+databases:
+  - name: novel-studio-db
+    region: frankfurt
+    plan: 0.1c-256mb
+    postgresMajorVersion: "16"
+    diskSizeGB: 5
+    ipAllowList: []
