@@ -88,6 +88,16 @@ apt-get install -y docker.io docker-compose-v2 git
 systemctl enable --now docker
 ~~~
 
+Установите Git и Python для серверных команд — это нужно и для образа Docker CE:
+
+~~~sh
+apt-get update
+~~~
+
+~~~sh
+apt-get install -y git python3
+~~~
+
 Получите код:
 
 ~~~sh
