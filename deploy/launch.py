@@ -45,7 +45,7 @@ def serve():
     subprocess.run([sys.executable, "-m", "app.cli", "migrate"], cwd=BACKEND, check=True)
     config = Path("/tmp/novel-nginx.conf")
     config.write_text((HERE / "nginx.conf.template").read_text().replace("__PORT__", str(port)))
-    subprocess.run(["nginx", "-t", "-c", str(config)], check=True)
+    subprocess.run(["nginx", "-e", "/dev/stderr", "-t", "-c", str(config)], check=True)
     children = []
     stopping = False
 
@@ -63,7 +63,7 @@ def serve():
             sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
             "--port", "8001", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1",
         ], cwd=BACKEND))
-        children.append(subprocess.Popen(["nginx", "-c", str(config), "-g", "daemon off;"]))
+        children.append(subprocess.Popen(["nginx", "-e", "/dev/stderr", "-c", str(config), "-g", "daemon off;"]))
         while not stopping and all(child.poll() is None for child in children):
             time.sleep(0.25)
         if not stopping:

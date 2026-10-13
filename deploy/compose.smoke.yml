@@ -33,6 +33,16 @@ services:
       timeout: 5s
       retries: 30
       start_period: 10s
+  worker:
+    image: novel-studio-smoke
+    profiles: ["worker-smoke"]
+    command: ["python", "/app/deploy/launch.py", "worker"]
+    environment:
+      NOVEL_DATABASE_URL: postgresql+psycopg://novel:smoke-only-password@db:5432/novel
+      NOVEL_OPENAI_API_KEY: sk-test-no-external-generation
+    depends_on:
+      api:
+        condition: service_healthy
   tls:
     image: caddy:2-alpine
     ports:

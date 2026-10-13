@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 import http.cookiejar
 import json
+import os
 from pathlib import Path
 import re
 import ssl
@@ -39,15 +40,16 @@ def redact(value: str) -> str:
     return value
 
 
-def run(args, *, label, timeout=180, input_text=None, check=True):
+def run(args, *, label, timeout=180, input_text=None, check=True, env=None):
     print(label, flush=True)
     result = subprocess.run(args, cwd=ROOT, input=input_text, capture_output=True,
-                            text=True, encoding="utf-8", errors="replace", timeout=timeout)
+                            text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
     with (ARTIFACTS / "commands.log").open("a", encoding="utf-8") as log:
         log.write(f"\n{label}\n")
         log.write(redact(result.stdout))
         log.write(redact(result.stderr))
     if check and result.returncode:
+        print(redact(result.stdout[-6000:] + result.stderr[-6000:]), flush=True)
         raise RuntimeError(f"{label} failed with exit code {result.returncode}; see deployment-artifacts/commands.log")
     return result
 
@@ -283,6 +285,27 @@ def verify_database_clients(desktop, mobile):
     return assert_persisted
 
 
+def verify_idle_worker():
+    source = """
+from sqlalchemy import select, func
+from app.config import Settings
+from app.database import make_engine
+from app.generation.models import GenerationJob
+engine = make_engine(Settings().database_url)
+with engine.connect() as db:
+    assert db.scalar(select(func.count()).select_from(GenerationJob)) == 0
+engine.dispose()
+"""
+    compose("exec", "-T", "api", "python", "-c", source,
+            label="Confirm no queued generation before worker smoke")
+    compose("up", "-d", "worker", label="Start idle worker with a non-billable test key")
+    time.sleep(5)
+    result = run(["docker", "inspect", "--format", "{{json .State}}", container_id("worker")],
+                 label="Inspect idle worker process", timeout=20)
+    assert json.loads(result.stdout)["Running"] is True
+    compose("stop", "worker", label="Stop idle smoke worker", timeout=30)
+
+
 def verify(context):
     anonymous = Client(context)
     wait_status(anonymous)
@@ -301,6 +324,7 @@ def verify(context):
                     {"X-CSRF-Token": "invalid-smoke-token"}).expect(403)
     assert_persisted = verify_database_clients(desktop, mobile)
     original_volume = database_volume()
+    verify_idle_worker()
     compose("stop", "db", label="Stop PostgreSQL", timeout=60)
     wait_status(anonymous, "/api/ready", 503, timeout=30)
     anonymous.request("GET", "/api/health").expect()
@@ -315,12 +339,26 @@ def verify(context):
     wait_status(anonymous)
     assert_persisted()
     verify_static(anonymous)
+    # Exercise the real proxy limiter after all session-dependent checks.
+    throttled = False
+    for attempt in range(20):
+        response = anonymous.request("GET", "/api/v1/session")
+        if response.status == 429:
+            assert response.json()["detail"]["code"] == "rate_limited"
+            assert response.headers.get("Retry-After")
+            throttled = True
+            break
+        response.expect()
+    assert throttled, "Public session endpoint must be rate limited."
 
 
 def main():
     assert COMPOSE_FILE.is_file(), "deploy/compose.smoke.yml is missing."
     ARTIFACTS.mkdir(exist_ok=True)
     try:
+        run(["docker", "compose", "--file", str(ROOT / "compose.yaml"), "config", "--quiet"],
+            label="Validate production Compose", env=dict(os.environ, NOVEL_DOMAIN="novel.example.test",
+            POSTGRES_PASSWORD="disposable-production-config-only", NOVEL_OPENAI_API_KEY=""))
         compose("config", "--quiet", label="Validate smoke Compose configuration")
         compose("down", "--volumes", "--remove-orphans", label="Remove previous disposable smoke project")
         compose("build", "api", label="Build production image", timeout=600)
@@ -338,6 +376,7 @@ def main():
             logs = compose("logs", "--no-color", "--tail", "100",
                            label="Collect deployment logs", timeout=30, check=False)
             (ARTIFACTS / "compose.log").write_text(redact(logs.stdout + logs.stderr), encoding="utf-8")
+            print(redact(logs.stdout[-14000:] + logs.stderr[-2000:]), flush=True)
         finally:
             compose("down", "--volumes", "--remove-orphans", label="Remove disposable smoke project",
                     timeout=90, check=False)
