@@ -212,20 +212,69 @@ def verify_static(client):
 
 
 def create_author():
+    # Use the actual Windows-style backup/CLI transfer route. The staging file
+    # is root-owned mode 600, so a normal runtime user cannot read it.
+    compose("stop", "api", label="Stop API for private database import", timeout=60)
     source = """
-import json
-import sys
-from app.cli import create_user
+import json, os, sys
+from pathlib import Path
+from uuid import uuid4
+from app.cli import migrate, create_user, backup
 from app.config import Settings
 from app.database import make_engine, build_session_factory
+from app.models import Novel, Chapter, Revision, BibleEntry
+from app.services import payload_hash
 values = json.load(sys.stdin)
-engine = make_engine(Settings().database_url)
+settings = Settings(database_url="sqlite:////transfer/work.db", openai_api_key="")
+migrate(settings)
+engine = make_engine(settings.database_url)
 with build_session_factory(engine)() as db:
-    create_user(db, values["email"], values["password"])
+    user = create_user(db, values["email"], values["password"])
+    novel = Novel(owner_id=user.id, title="Роман из Windows", genre="роман")
+    db.add(novel)
+    db.commit()
+    chapter = Chapter(novel_id=novel.id, number=1, title="Сохранённая глава")
+    db.add(chapter)
+    db.commit()
+    content = "Марина сохранила письмо. Эта ручная редакция перенесена из Windows."
+    revision = Revision(chapter_id=chapter.id, text=content, source="manual",
+                        mutation_id=str(uuid4()), payload_hash=payload_hash(None, content))
+    db.add(revision)
+    db.commit()
+    chapter.current_revision_id = revision.id
+    chapter.approved_revision_id = revision.id
+    chapter.status = "APPROVED"
+    db.add(BibleEntry(novel_id=novel.id, kind="character", title="Марина",
+                     content="Героиню зовут Марина.", status="CANON"))
+    db.commit()
+    identifiers = {"novel": novel.id, "chapter": chapter.id, "revision": revision.id}
 engine.dispose()
+snapshot = backup(settings, Path("/transfer/novel-transfer.db"))
+os.chmod(snapshot, 0o600)
+print(json.dumps(identifiers))
 """
-    compose("exec", "-T", "api", "python", "-c", source, label="Create disposable smoke author",
-            input_text=json.dumps({"email": EMAIL, "password": PASSWORD}), timeout=60)
+    with tempfile.TemporaryDirectory(prefix="novel-private-import-") as directory:
+        prepared = compose(
+            "run", "--rm", "--no-deps", "--user", "0:0",
+            "-v", f"{directory}:/transfer", "api", "python", "-c", source,
+            label="Create a consistent private SQLite snapshot",
+            input_text=json.dumps({"email": EMAIL, "password": PASSWORD}), timeout=90,
+        )
+        identifiers = json.loads(prepared.stdout.strip().splitlines()[-1])
+        snapshot = Path(directory) / "novel-transfer.db"
+        assert snapshot.is_file()
+        imported = compose(
+            "run", "--rm", "--no-deps", "--user", "0:0",
+            "-v", f"{snapshot}:/tmp/novel-transfer.db:ro",
+            "api", "python", "-m", "app.transfer", "--source", "/tmp/novel-transfer.db",
+            label="Import private backup using the real container CLI", timeout=90,
+        )
+        report = json.loads(imported.stdout.strip().splitlines()[-1])
+        assert report["copied"]["users"] == 1
+        assert report["copied"]["chapters"] == 1
+        assert report["copied"]["revisions"] == 1
+    compose("up", "-d", "api", label="Start API after import", timeout=180)
+    return identifiers
 
 
 def export(client, novel_id, file_format, selection):
@@ -314,7 +363,8 @@ def verify(context):
     verify_static(anonymous)
     compose("exec", "-T", "api", "python", "-m", "app.cli", "migrate",
             label="Verify migrations can run again", timeout=60)
-    create_author()
+    imported = create_author()
+    wait_status(anonymous)
     desktop, mobile = Client(context), Client(context)
     login(desktop)
     login(mobile)

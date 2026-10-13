@@ -167,10 +167,17 @@ scp -i "$env:USERPROFILE\.ssh\novel_studio" .\novel-transfer.db root@SERVER_IP:/
 Файл содержит ваши тексты и аккаунт. Для него используются SSH и ваш сервер;
 не публикуйте его в GitHub или переписке.
 
-На **сервере**, в папке Novel_studio:
+На **сервере**, в папке Novel_studio, ограничьте доступ к копии:
 
 ~~~sh
-docker compose run --rm -v /root/novel-transfer.db:/tmp/novel-transfer.db:ro api python -m app.transfer --source /tmp/novel-transfer.db
+chmod 600 /root/novel-transfer.db
+~~~
+
+Импорт запускается отдельным административным контейнером, который сможет прочитать
+этот закрытый файл; постоянные API и worker работают от непривилегированного пользователя.
+
+~~~sh
+docker compose run --rm --user 0:0 -v /root/novel-transfer.db:/tmp/novel-transfer.db:ro api python -m app.transfer --source /tmp/novel-transfer.db
 ~~~
 
 Ожидается «Перенос завершён» и количество записей. Источник открывается только
