@@ -43,7 +43,7 @@ def wait_saved(page, origin, chapter_id, text):
 
 
 def verify_trash_browser(page, desktop, origin, novel_id, chapter_id):
-    page.get_by_role('button', name='Библиотека', exact=True).click()
+    page.get_by_role('navigation', name='Главное меню').get_by_role('button', name='Библиотека').click()
     desktop.set_offline(True)
     expect(page.get_by_test_id(f'novel-delete-{novel_id}')).to_be_disabled()
     desktop.set_offline(False)
@@ -56,7 +56,7 @@ def verify_trash_browser(page, desktop, origin, novel_id, chapter_id):
     try:
         page.get_by_test_id('chapter-editor').fill(unsynced)
         page.wait_for_timeout(1400)
-        page.get_by_role('button', name='Библиотека', exact=True).click()
+        page.get_by_role('navigation', name='Главное меню').get_by_role('button', name='Библиотека').click()
         page.get_by_test_id(f'novel-delete-{novel_id}').click()
         expect(page.get_by_test_id('novel-trash-blocked')).to_be_visible()
         expect(page.get_by_test_id('novel-trash-confirm')).to_have_count(0)
@@ -72,7 +72,7 @@ def verify_trash_browser(page, desktop, origin, novel_id, chapter_id):
         'kind': 'idea', 'title': 'Идея для удаления', 'content': 'Неутверждённый вариант.', 'status': 'IDEA'}, headers=headers)
     assert response.status == 201, response.text()
     entry_id = response.json()['id']
-    page.get_by_role('button', name='Библия романа', exact=True).click()
+    page.get_by_role('navigation', name='Главное меню').get_by_role('button', name='Библия романа').click()
     page.get_by_test_id(f'bible-delete-{entry_id}').click()
     page.get_by_test_id('bible-trash-cancel').click()
     expect(page.get_by_test_id(f'bible-delete-{entry_id}')).to_be_visible()
@@ -85,7 +85,7 @@ def verify_trash_browser(page, desktop, origin, novel_id, chapter_id):
     restored_entries = page.request.get(f'{origin}/api/v1/novels/{novel_id}/bible').json()['items']
     restored_entry = next(e for e in restored_entries if e['id'] == entry_id)
     assert restored_entry['status'] == 'IDEA' and restored_entry['deleted_at'] is None
-    page.get_by_role('button', name='Библиотека', exact=True).click()
+    page.get_by_role('navigation', name='Главное меню').get_by_role('button', name='Библиотека').click()
     page.get_by_test_id(f'novel-delete-{novel_id}').click()
     page.get_by_test_id('novel-trash-cancel').click()
     expect(page.get_by_test_id(f'novel-open-{novel_id}')).to_be_visible()

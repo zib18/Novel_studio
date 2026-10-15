@@ -47,6 +47,13 @@ jobs:
       - name: Test database, author decisions and independent pipeline
         working-directory: backend
         run: python -m pytest -q
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Windows'
+        with:
+          node-version: '22'
+      - name: Exercise actual Windows updater and installed server
+        if: runner.os == 'Windows'
+        run: python backend/scripts/verify_windows_update.py
       - name: Test restart, two sessions, exports and failed generation
         run: python backend/scripts/verify_studio.py
       - name: Check Git rules and real HTTP server
