@@ -97,3 +97,58 @@ def test_updater_requires_separate_directories(releases):
         with pytest.raises(ValueError, match="отдельную папку"):
             updater.check_paths(source, unsafe)
     assert updater.check_paths(source, target)[1] == target.resolve()
+
+
+@pytest.fixture(scope="module")
+def real_windows_venv(tmp_path_factory):
+    if os.name != "nt":
+        pytest.skip("Windows process API")
+    import venv
+    root = tmp_path_factory.mktemp("real-updater-venv")
+    venv.EnvBuilder(with_pip=False, system_site_packages=True).create(root)
+    return root / "Scripts/python.exe"
+
+
+def test_windows_process_guard_detects_running_interpreter(real_windows_venv, tmp_path):
+    import time
+    python = real_windows_venv
+    updater.ensure_stopped(python)
+    ready = tmp_path / "ready"
+    code = "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ready'); sys.stdin.read()"
+    child = subprocess.Popen([str(python), "-c", code, str(ready)], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 15
+        while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "Real venv interpreter did not start"
+        with pytest.raises(ValueError, match="Остановите сервер"):
+            updater.ensure_stopped(python)
+    finally:
+        try:
+            child.communicate(input="", timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate(timeout=5)
+    assert child.returncode == 0
+    updater.ensure_stopped(python)
+
+
+def test_windows_process_guard_excludes_own_venv_launcher(real_windows_venv):
+    probe = "import runpy,sys; runpy.run_path(sys.argv[1])['ensure_stopped'](sys.argv[2])"
+    completed = subprocess.run(
+        [str(real_windows_venv), "-c", probe, str(Path(updater.__file__).resolve()), str(real_windows_venv)],
+        capture_output=True, text=True, timeout=15)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("error", [OSError("process query denied"), ValueError("cannot inspect process")])
+def test_process_inspection_failure_stops_before_backup_or_copy(releases, monkeypatch, error):
+    source, target, _, _, calls, runner = releases
+    def fail(python):
+        raise error
+    monkeypatch.setattr(updater, "ensure_stopped", fail)
+    with pytest.raises(type(error), match=str(error)):
+        updater.update(source, target, runner)
+    assert calls == []
+    assert (target / "backend/app/cli.py").read_text(encoding="utf-8") == "old"

@@ -62,23 +62,92 @@ def run(args, cwd):
     subprocess.run([str(a) for a in args], cwd=cwd, env=env, check=True)
 
 
+def windows_processes():
+    """Read process images directly; this avoids WMI/PowerShell service timeouts."""
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    for name in ("Process32FirstW", "Process32NextW"):
+        function = getattr(kernel, name)
+        function.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+        function.restype = wintypes.BOOL
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    snapshot = kernel.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    result = []
+    try:
+        entry = ProcessEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        found = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while found:
+            result.append((entry.th32ProcessID, entry.th32ParentProcessID, entry.szExeFile))
+            found = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+        error = ctypes.get_last_error()
+        if error != 18:  # ERROR_NO_MORE_FILES
+            raise ctypes.WinError(error)
+    finally:
+        kernel.CloseHandle(snapshot)
+
+    images = {}
+    for pid, _, name in result:
+        if not name.casefold().startswith("python"):
+            continue
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == 87:  # The process exited before OpenProcess.
+                continue
+            raise ValueError(f"Не удалось проверить процесс Python (PID {pid}, код {error}). "
+                             "Обновление остановлено до изменения файлов.")
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buffer))
+            if kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                images[pid] = buffer.value
+            else:
+                error = ctypes.get_last_error()
+                if error not in (6, 87):  # A process can disappear during enumeration.
+                    raise ValueError(f"Не удалось прочитать сведения о Python (PID {pid}, код {error}). "
+                                     "Обновление остановлено до изменения файлов.")
+        finally:
+            kernel.CloseHandle(handle)
+    return result, images
+
+
 def ensure_stopped(python):
     if os.name != "nt":
         return
-    script = r"""
-$found = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
-    $_.ProcessId -ne [int]$env:NOVEL_UPDATER_PID -and
-    ($_.ExecutablePath -ieq $env:NOVEL_UPDATER_PYTHON -or
-      ($_.Name -like 'python*' -and
-       ([string]$_.CommandLine).IndexOf($env:NOVEL_UPDATER_PYTHON,
-          [System.StringComparison]::OrdinalIgnoreCase) -ge 0))
-}
-if ($found) { exit 10 }
-"""
-    env = dict(os.environ, NOVEL_UPDATER_PID=str(os.getpid()), NOVEL_UPDATER_PYTHON=str(python))
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                            env=env, capture_output=True, timeout=30)
-    if result.returncode:
+    python = Path(python)
+    processes, images = windows_processes()
+    parents = {pid: parent for pid, parent, _ in processes}
+    # A Windows venv redirector can be the waiting parent of this Python process.
+    ancestors, pid = set(), os.getpid()
+    while pid and pid not in ancestors:
+        ancestors.add(pid)
+        pid = parents.get(pid, 0)
+    target_images = {os.path.normcase(str(python.resolve())),
+                     os.path.normcase(str(python.with_name("pythonw.exe").resolve()))}
+    if any(pid not in ancestors and os.path.normcase(image) in target_images
+           for pid, image in images.items()):
         raise ValueError("Остановите сервер и обработчик ИИ: нажмите Ctrl+C в обоих окнах PowerShell. "
                          "Если они уже остановлены, закройте их окна и повторите обновление.")
 
