@@ -169,7 +169,7 @@ def validate_text(text: str, snapshot: Mapping[str, Any]) -> list[Finding]:
                    if repeat_count > 0 else ""),
                 suggestion="Удалить или переписать фрагмент согласно решению автора.", position=match.start()))
     for item in _rows(snapshot.get("bible")):
-        if not item.get("id") or item.get("active") is False or _status(item.get("status")) not in _CANON_STATUSES:
+        if not item.get("id") or item.get("active") is False or item.get("deleted_at") or _status(item.get("status")) not in _CANON_STATUSES:
             continue
         status = _status(item.get("status"))
         details = _details(item)

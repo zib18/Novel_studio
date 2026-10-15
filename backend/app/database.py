@@ -35,5 +35,6 @@ def build_session_factory(engine):
 
 def get_db(request: Request):
     with request.app.state.session_factory() as db:
+        db.info["lock_live_novel"] = request.method not in ("GET", "HEAD", "OPTIONS")
         yield db
 

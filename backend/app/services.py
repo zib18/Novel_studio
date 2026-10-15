@@ -11,7 +11,15 @@ APPROVED = ("CANON", "FACT", "FUTURE_CANON")
 
 
 def owned_novel(db, novel_id, user):
-    novel = db.scalar(select(Novel).where(Novel.id == novel_id, Novel.owner_id == user.id))
+    where = (Novel.id == novel_id, Novel.owner_id == user.id, Novel.deleted_at.is_(None))
+    if db.info.get("lock_live_novel"):
+        # Parent-first locks serialize mutations with trash in SQLite and PostgreSQL.
+        changed = db.execute(update(Novel).where(*where).values(
+            updated_at=Novel.updated_at
+        ).execution_options(synchronize_session=False)).rowcount
+        if changed != 1:
+            fail(404, "not_found", "Роман не найден")
+    novel = db.scalar(select(Novel).where(*where).execution_options(populate_existing=True))
     if novel is None:
         fail(404, "not_found", "Роман не найден")
     return novel
@@ -22,6 +30,7 @@ def owned_chapter(db, chapter_id, user):
     if chapter is None:
         fail(404, "not_found", "Глава не найдена")
     owned_novel(db, chapter.novel_id, user)
+    db.refresh(chapter)
     return chapter
 
 
@@ -30,6 +39,9 @@ def owned_entry(db, entry_id, user):
     if entry is None:
         fail(404, "not_found", "Запись не найдена")
     owned_novel(db, entry.novel_id, user)
+    db.refresh(entry)
+    if entry.deleted_at is not None:
+        fail(404, "not_found", "Запись не найдена")
     return entry
 
 
@@ -135,6 +147,8 @@ def save_revision(db, chapter, base_revision_id, text, source, mutation_id, *, c
 
 
 def confirm_entry(db, entry, novel, user, decision):
+    if entry.deleted_at is not None or novel.deleted_at is not None:
+        fail(404, "not_found", "Запись не найдена")
     if entry.version != decision.base_version or not entry.active:
         fail(409, "entry_conflict", "Запись уже изменена")
     if entry.status not in ("IDEA", "PROPOSAL", "UNDEFINED") and decision.action == "approve":
@@ -148,12 +162,12 @@ def confirm_entry(db, entry, novel, user, decision):
     if old and decision.action == "approve" and (not old.active or old.status not in APPROVED):
         fail(409, "replacement_conflict", "Заменяемый факт уже изменён")
     canon_changed = db.execute(update(Novel).where(
-        Novel.id == novel.id, Novel.canon_version == decision.expected_canon_version
+        Novel.id == novel.id, Novel.deleted_at.is_(None), Novel.canon_version == decision.expected_canon_version
     ).values(canon_version=Novel.canon_version + 1, updated_at=utcnow())
                                .execution_options(synchronize_session=False)).rowcount
     changed = db.execute(update(BibleEntry).where(
         BibleEntry.id == entry.id, BibleEntry.version == decision.base_version,
-        BibleEntry.active.is_(True)
+        BibleEntry.active.is_(True), BibleEntry.deleted_at.is_(None)
     ).values(status=target, version=entry.version + 1)
                          .execution_options(synchronize_session=False)).rowcount
     if changed != 1 or canon_changed != 1:

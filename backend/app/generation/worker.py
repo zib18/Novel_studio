@@ -19,7 +19,11 @@ HEARTBEAT_SECONDS = 10.0
 
 def claim_job(factory, owner: str, now: float | None = None):
     now = now or time.time()
+    live_novel = select(core_models.Novel.id).where(
+        core_models.Novel.id == GenerationJob.novel_id,
+        core_models.Novel.deleted_at.is_(None)).exists()
     eligible = and_(GenerationJob.status.in_(("queued", "running")),
+                    GenerationJob.cancel_requested.is_(False), live_novel,
                     or_(GenerationJob.lease_until.is_(None), GenerationJob.lease_until < now))
     with factory() as db:
         candidates = db.scalars(select(GenerationJob.id).where(eligible)

@@ -11,6 +11,7 @@ from app.config import Settings
 from app.database import make_engine
 from app.auth import get_current_user
 from app.api import router as core_router
+from app.trash import router as trash_router
 from app.exports import router as export_router
 from app.generation.api import router as generation_router
 from app import models  # register core tables
@@ -71,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     application.include_router(core_router)
+    application.include_router(trash_router)
     application.include_router(generation_router)
     application.include_router(export_router)
 

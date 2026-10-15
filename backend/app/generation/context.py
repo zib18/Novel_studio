@@ -24,7 +24,7 @@ def safe_entry(entry: dict, chapter_number: int) -> bool:
     status = entry["status"].upper().replace(" ", "_")
     kind = entry["kind"].lower()
     available = entry.get("available_from_chapter")
-    if not entry.get("active") or status not in ("CANON", "FACT", "FUTURE_CANON"):
+    if entry.get("deleted_at") or not entry.get("active") or status not in ("CANON", "FACT", "FUTURE_CANON"):
         return False
     if status == "FUTURE_CANON" and (available is None or available > chapter_number):
         return False
@@ -47,7 +47,8 @@ def make_snapshot(db, novel, chapter, instructions: str, context_limit: int) -> 
                 "status": e.status, "active": e.active,
                 "available_from_chapter": e.available_from_chapter, "details": e.details or {}}
                for e in db.scalars(select(BibleEntry).where(BibleEntry.novel_id == novel.id,
-                                                            BibleEntry.active.is_(True)))]
+                                                            BibleEntry.active.is_(True),
+                                                            BibleEntry.deleted_at.is_(None)))]
     rejected = [{"id": r.id, "phrase": r.phrase, "description": r.description,
                  "scope": r.scope, "severity": r.severity, "repeat_count": r.repeat_count,
                  "status": r.status}
@@ -114,7 +115,7 @@ def guardian_context(snapshot: dict, text: str, limit: int) -> tuple[dict, bool]
         words = re.findall(r"\w{4,}", (entry["title"] + " " + entry["content"]).casefold())
         return (direct, entry["kind"].lower() in ("current_state", "knowledge"),
                 len(terms.intersection(words)))
-    entries = sorted(snapshot["bible"], key=relevance, reverse=True)
+    entries = sorted((entry for entry in snapshot["bible"] if not entry.get("deleted_at")), key=relevance, reverse=True)
     chosen, size = [], len(text) + 2048
     for entry in entries:
         entry_size = len(json.dumps(entry, ensure_ascii=False))

@@ -120,6 +120,46 @@ def login(client, email, password):
     assert session['user']['email'] == email
     client.headers['X-CSRF-Token'] = session['csrf_token']
 
+def verify_trash(desktop, mobile, server, novel, chapter, revision):
+    novel_path = f"/api/v1/novels/{novel['id']}"
+    chapter_path = f"/api/v1/chapters/{chapter['id']}"
+    untouched = request_json(desktop, 'POST', '/api/v1/novels', expected=201,
+                             payload={'title': 'Другой независимый роман'})
+    entry = request_json(desktop, 'POST', novel_path + '/bible', expected=201, payload={
+        'kind': 'idea', 'title': 'Проверяемая идея', 'content': 'Вариант на рассмотрении.', 'status': 'IDEA'})
+    work = request_json(desktop, 'GET', novel_path)
+    before = {'base_version': entry['version'], 'expected_canon_version': work['canon_version']}
+    result = request_json(desktop, 'POST', f"/api/v1/bible/{entry['id']}/trash", payload=before)
+    assert result['entry']['deleted_at']
+    assert entry['id'] not in {e['id'] for e in request_json(mobile, 'GET', novel_path + '/bible')['items']}
+    assert request_json(mobile, 'GET', novel_path + '/trash/ideas')['items'][0]['id'] == entry['id']
+    request_json(mobile, 'POST', f"/api/v1/bible/{entry['id']}/restore", expected=409, payload=before)
+    restored = request_json(desktop, 'POST', f"/api/v1/bible/{entry['id']}/restore", payload={
+        'base_version': result['entry']['version'], 'expected_canon_version': result['novel']['canon_version']})
+    assert restored['entry']['status'] == 'IDEA' and restored['entry']['deleted_at'] is None
+    work = request_json(desktop, 'GET', novel_path)
+    old_action = {'base_version': work['version'], 'expected_canon_version': work['canon_version']}
+    trashed = request_json(desktop, 'POST', novel_path + '/trash', payload=old_action)
+    active_ids = {n['id'] for n in request_json(mobile, 'GET', '/api/v1/novels')['items']}
+    assert novel['id'] not in active_ids and untouched['id'] in active_ids
+    request_json(mobile, 'GET', chapter_path, expected=404)
+    request_json(mobile, 'PUT', chapter_path + '/text', expected=404, payload={
+        'base_revision_id': revision['id'], 'text': 'Нельзя перезаписать удалённый роман.', 'mutation_id': str(uuid4())})
+    server.restart()
+    trash = request_json(mobile, 'GET', '/api/v1/trash/novels')['items']
+    assert next(row for row in trash if row['id'] == novel['id'])['deleted_at']
+    request_json(mobile, 'GET', novel_path, expected=404)
+    returned = request_json(desktop, 'POST', novel_path + '/restore', payload={
+        'base_version': trashed['version'], 'expected_canon_version': trashed['canon_version']})
+    assert returned['id'] == novel['id'] and returned['deleted_at'] is None
+    request_json(mobile, 'POST', novel_path + '/trash', expected=409, payload=old_action)
+    saved_again = request_json(mobile, 'GET', chapter_path)['current_revision']
+    assert saved_again['id'] == revision['id'] and saved_again['text'] == revision['text']
+    assert request_json(mobile, 'GET', chapter_path + '/revisions')['total'] >= 3
+    assert request_json(desktop, 'GET', novel_path + '/trash/ideas')['total'] == 0
+    assert request_json(mobile, 'GET', f"/api/v1/novels/{untouched['id']}")['deleted_at'] is None
+
+
 def verify():
     with TemporaryDirectory(prefix='novel-smoke-') as directory:
         database_path = Path(directory) / 'novel.db'
@@ -169,6 +209,7 @@ def verify():
                 assert history['total'] >= 3
                 assert {saved['id'], current['id']} <= {r['id'] for r in history['items']}
                 assert approved_text in exported('txt', 'approved').decode('utf-8-sig')
+                verify_trash(desktop, mobile, server, novel, chapter, current)
         if env['NOVEL_DATABASE_URL'].startswith('sqlite:'):
             assert database_path.is_file()
     print('Novel Studio HTTP smoke passed: sessions, saves, conflicts, approval, exports, missing-key error, persistence.')

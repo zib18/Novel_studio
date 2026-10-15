@@ -535,3 +535,202 @@ def test_context_prioritizes_latest_approved_chapter_with_large_bible(storage):
     assert context["recent_chapters"][-1]["number"] == 3
     assert context["recent_chapters"][-1]["text"] == latest_text
     assert not context["recent_chapters"][-1]["truncated"]
+
+
+@pytest.mark.parametrize("reason", ["deleted", "cancel_requested"])
+def test_worker_does_not_claim_deleted_or_cancelled_context(storage, reason):
+    from datetime import datetime, timezone
+    db, factory, user, novel, chapter = storage
+    job = job_for(db, user, novel, chapter)
+    if reason == "deleted":
+        novel.deleted_at = datetime.now(timezone.utc)
+    else:
+        job.cancel_requested = True
+    db.commit()
+    assert claim_job(factory, "worker") is None
+    db.refresh(job)
+    assert job.attempts == 0
+
+
+def test_deleted_entries_are_absent_from_snapshot_and_defensive_context(storage):
+    from datetime import datetime, timezone
+    from app.generation.context import guardian_context
+    db, _, _, novel, chapter = storage
+    retained = BibleEntry(novel_id=novel.id, kind="character", title="Елена",
+                          content="Главная героиня", status="CANON", active=True)
+    removed = BibleEntry(novel_id=novel.id, kind="idea", title="Удалённая идея",
+                         content="Не использовать эту идею", status="IDEA", active=True,
+                         deleted_at=datetime.now(timezone.utc))
+    db.add_all([retained, removed])
+    db.commit()
+    data = make_snapshot(db, novel, chapter, "Написать главу", 40000)
+    assert retained.id in {row["id"] for row in data["bible"]}
+    assert removed.id not in {row["id"] for row in data["bible"]}
+    deleted_record = dict(id=removed.id, kind="core", title="Удалено", content="Старый факт",
+                          active=True, status="CANON", deleted_at="2026-10-15T00:00:00Z")
+    assert not safe_entry(deleted_record, 1)
+    data["bible"].append(deleted_record)
+    context, complete = guardian_context(data, "Елена вошла.", 40000)
+    assert complete
+    assert removed.id not in {row["id"] for row in context["bible"]}
+    report = ReviewResult(complete=True, limitations=[], findings=[Finding(
+        id="deleted-source", category="continuity", severity="critical", quote="Елена",
+        explanation="Удалённый источник", suggestion="Изменить", rule_id="bible:" + removed.id)])
+    assert not validate_report(report, "Елена вошла.", data, "continuity").complete
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["deleted", "canon", "owner"])
+async def test_stale_context_stops_before_paid_call_even_with_cached_novel(storage, reason):
+    from datetime import datetime, timezone
+    db, factory, user, novel, chapter = storage
+    job = job_for(db, user, novel, chapter)
+    with factory() as worker_db:
+        cached = worker_db.get(Novel, novel.id)
+        worker_job = worker_db.get(GenerationJob, job.id)
+        if reason == "deleted":
+            novel.deleted_at = datetime.now(timezone.utc)
+        elif reason == "canon":
+            novel.canon_version += 1
+        else:
+            other = User(email="other@example.test", password_hash="unused")
+            db.add(other)
+            db.flush()
+            novel.owner_id = other.id
+        db.commit()
+        if reason == "deleted":
+            assert cached.deleted_at is None
+        elif reason == "canon":
+            assert cached.canon_version != novel.canon_version
+        else:
+            assert cached.owner_id != novel.owner_id
+        provider = FakeProvider()
+        await Pipeline(worker_db, worker_job, provider, settings()).execute()
+        assert provider.calls == []
+        assert worker_job.status == "cancelled"
+        assert worker_job.cancel_requested
+        assert worker_job.active_chapter_id is None
+    db.refresh(chapter)
+    assert chapter.current_revision_id == job.base_revision_id
+
+
+@pytest.mark.parametrize("reason", ["deleted", "canon", "cancel_requested", "terminal"])
+def test_ownerless_pipeline_save_has_atomic_context_and_status_guards(storage, monkeypatch, reason):
+    from datetime import datetime, timezone
+    db, factory, user, novel, chapter = storage
+    job = job_for(db, user, novel, chapter)
+    pipeline = Pipeline(db, job, FakeProvider(), settings())
+    monkeypatch.setattr(pipeline, "check", lambda: None)
+    with factory() as changed:
+        if reason in ("deleted", "canon"):
+            row = changed.get(Novel, novel.id)
+            if reason == "deleted":
+                row.deleted_at = datetime.now(timezone.utc)
+            else:
+                row.canon_version += 1
+        else:
+            row = changed.get(GenerationJob, job.id)
+            if reason == "cancel_requested":
+                row.cancel_requested = True
+            else:
+                row.status = "rejected"
+        changed.commit()
+    with pytest.raises(LeaseLost):
+        pipeline.save(artifacts={"draft_text": "Поздний результат"})
+    db.refresh(job)
+    assert "draft_text" not in job.artifacts
+
+
+@pytest.mark.asyncio
+async def test_late_provider_response_preserves_trash_decision_drafts_and_usage(storage):
+    from datetime import datetime, timezone
+    db, factory, user, novel, chapter = storage
+    job = job_for(db, user, novel, chapter)
+    novel_id, chapter_id, job_id = novel.id, chapter.id, job.id
+
+    class TrashDuringWriter(FakeProvider):
+        manual_revision_id = None
+
+        async def call(self, name, rules, payload, output_type, max_output_tokens):
+            result = await super().call(name, rules, payload, output_type, max_output_tokens)
+            if name == "writer":
+                with factory() as other:
+                    fresh_chapter = other.get(Chapter, chapter_id)
+                    revision = save_revision(
+                        other, fresh_chapter, fresh_chapter.current_revision_id,
+                        "Последняя ручная правка перед удалением.", "manual", str(uuid4()))
+                    self.manual_revision_id = revision.id
+                    removed_novel = other.get(Novel, novel_id)
+                    removed_novel.deleted_at = datetime.now(timezone.utc)
+                    removed_novel.canon_version += 1
+                    removed_job = other.get(GenerationJob, job_id)
+                    removed_job.status = "cancelled"
+                    removed_job.stage = "context_changed"
+                    removed_job.cancel_requested = True
+                    removed_job.error = "Автор удалил роман."
+                    removed_job.active_chapter_id = None
+                    removed_job.lease_owner = None
+                    removed_job.lease_until = None
+                    other.commit()
+            return result
+
+    provider = TrashDuringWriter()
+    await Pipeline(db, job, provider, settings()).execute()
+    assert provider.calls == ["architect", "writer"]
+    with factory() as fresh:
+        persisted = fresh.get(GenerationJob, job_id)
+        assert persisted.status == "cancelled"
+        assert persisted.stage == "context_changed"
+        assert persisted.error == "Автор удалил роман."
+        assert persisted.cancel_requested
+        assert persisted.active_chapter_id is None
+        assert "draft_text" not in persisted.artifacts
+        assert "writer" not in persisted.artifacts.get("checkpoints", {})
+        assert fresh.get(Chapter, chapter_id).current_revision_id == provider.manual_revision_id
+        assert fresh.get(Revision, provider.manual_revision_id).text == "Последняя ручная правка перед удалением."
+        assert [call["agent"] for call in persisted.usage["calls"]] == ["architect", "writer"]
+        assert persisted.usage["calls"][-1]["uncertain"]
+        assert persisted.usage["cost_usd"] > 0
+        ledger = fresh.scalar(select(UsageLedger).where(UsageLedger.user_id == user.id))
+        assert ledger.cost_usd == pytest.approx(persisted.usage["cost_usd"])
+        restored = fresh.get(Novel, novel_id)
+        restored.deleted_at = None
+        restored.canon_version += 1
+        fresh.commit()
+    assert claim_job(factory, "after-restore") is None
+    another_provider = FakeProvider()
+    await Pipeline(db, job, another_provider, settings()).execute()
+    assert another_provider.calls == []
+
+
+@pytest.mark.parametrize("status,stage", [
+    ("cancelled", "context_changed"), ("awaiting_author", "complete"),
+    ("rejected", "complete"), ("applied", "complete"),
+])
+def test_finish_cancel_does_not_overwrite_committed_terminal_decision(storage, status, stage):
+    db, _, user, novel, chapter = storage
+    job = job_for(db, user, novel, chapter)
+    job.status, job.stage = status, stage
+    job.error = "Причина сохранена."
+    job.artifacts = {"draft_text": "Сохранённый вариант."}
+    job.active_chapter_id = None
+    db.commit()
+    Pipeline(db, job, FakeProvider(), settings()).finish_cancel()
+    assert job.status == status and job.stage == stage
+    assert job.error == "Причина сохранена."
+    assert job.artifacts["draft_text"] == "Сохранённый вариант."
+
+
+@pytest.mark.asyncio
+async def test_stale_canon_is_claimed_then_cancelled_without_spending(storage):
+    db, factory, user, novel, chapter = storage
+    job = job_for(db, user, novel, chapter)
+    novel.canon_version += 1
+    db.commit()
+    assert claim_job(factory, "worker") == job.id
+    db.refresh(job)
+    provider = FakeProvider()
+    await Pipeline(db, job, provider, settings(), owner="worker").execute()
+    assert provider.calls == []
+    assert job.status == "cancelled" and job.cancel_requested
+    assert job.active_chapter_id is None

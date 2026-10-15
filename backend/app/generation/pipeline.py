@@ -12,7 +12,7 @@ from .models import GenerationJob, UsageLedger, utc_now
 from .schemas import Finding, PlanResult, TextResult, ReviewResult
 from .validators import validate_text
 from .context import guardian_context
-from app.models import RejectRule
+from app.models import Novel, RejectRule
 
 EDITOR_RULES = {"prose.flow", "dialogue.natural", "dialogue.voice", "gesture.variety",
                 "emotion.depth", "behavior.logic", "romance.gradual", "chapter.pacing",
@@ -33,7 +33,7 @@ class BudgetExceeded(Exception):
 
 def validate_report(report: ReviewResult, text: str, snapshot: dict, role: str) -> ReviewResult:
     ids = {"bible:" + e["id"] for e in snapshot["bible"]
-           if e.get("active") is not False and
+           if e.get("active") is not False and not e.get("deleted_at") and
            str(e.get("status", "")).upper().replace(" ", "_") in ("CANON", "FACT", "FUTURE_CANON")}
     ids |= {"reject:" + r["id"] for r in snapshot["rejected"]
             if r.get("active") is not False and str(r.get("status", "ACTIVE")).upper()
@@ -63,7 +63,13 @@ class Pipeline:
         self.db.refresh(self.job)
         if self.owner and (self.job.lease_owner != self.owner or (self.job.lease_until or 0) < time.time()):
             raise LeaseLost()
-        if self.job.cancel_requested:
+        if self.job.cancel_requested or self.job.status not in ("queued", "running"):
+            raise CancelledJob()
+        state = self.db.execute(select(Novel.owner_id, Novel.canon_version, Novel.deleted_at)
+                                .where(Novel.id == self.job.novel_id)).one_or_none()
+        if (state is None or state.deleted_at is not None
+                or state.canon_version != self.job.canon_version
+                or state.owner_id != self.job.snapshot.get("owner_id")):
             raise CancelledJob()
 
     def save(self, *, artifacts=None, usage=None, stage=None, **fields):
@@ -75,10 +81,16 @@ class Pipeline:
             values["usage"] = deepcopy(usage)
         if stage:
             values["stage"] = stage
-        condition = GenerationJob.id == self.job.id
+        live_context = select(Novel.id).where(
+            Novel.id == self.job.novel_id, Novel.deleted_at.is_(None),
+            Novel.owner_id == self.job.snapshot.get("owner_id"),
+            Novel.canon_version == self.job.canon_version).exists()
+        condition = ((GenerationJob.id == self.job.id)
+                     & GenerationJob.status.in_(("queued", "running"))
+                     & GenerationJob.cancel_requested.is_(False) & live_context)
         if self.owner:
             condition = condition & (GenerationJob.lease_owner == self.owner) & (
-                GenerationJob.lease_until > time.time()) & GenerationJob.cancel_requested.is_(False)
+                GenerationJob.lease_until > time.time())
         changed = self.db.execute(update(GenerationJob).where(condition).values(**values)
                                   .execution_options(synchronize_session=False)).rowcount
         if changed != 1:
@@ -173,11 +185,12 @@ class Pipeline:
 
     def finish_cancel(self):
         self.db.rollback()
-        condition = GenerationJob.id == self.job.id
+        condition = ((GenerationJob.id == self.job.id)
+                     & GenerationJob.status.in_(("queued", "running")))
         if self.owner:
             condition = condition & (GenerationJob.lease_owner == self.owner)
         self.db.execute(update(GenerationJob).where(condition).values(
-            status="cancelled", stage="cancelled", active_chapter_id=None,
+            status="cancelled", stage="cancelled", cancel_requested=True, active_chapter_id=None,
             lease_owner=None, lease_until=None, updated_at=utc_now()
         ).execution_options(synchronize_session=False))
         self.db.commit()
