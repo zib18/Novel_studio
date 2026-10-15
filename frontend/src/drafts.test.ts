@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import {describe,expect,it} from 'vitest';
 import {ApiError} from './api';
-import {editDraft,getCache,getDraft,initialiseDraft,listBackups,putCache,resolveConflict,syncDraft,waitForDraftSync,type PendingMutation} from './drafts';
+import {listUnsyncedNovelDrafts,editDraft,getCache,getDraft,initialiseDraft,listBackups,putCache,resolveConflict,syncDraft,waitForDraftSync,type PendingMutation} from './drafts';
 import type {Chapter,Revision} from './types';
 const fixture=async()=>{const owner=crypto.randomUUID(),id=crypto.randomUUID(),chapter:Chapter={id,novel_id:crypto.randomUUID(),number:1,title:'Глава'},revision:Revision={id:crypto.randomUUID(),chapter_id:id,text:'Исходный текст'};await initialiseDraft(owner,chapter,revision);return {owner,chapter,revision};};
 function deferred<T>(){let resolve!:(value:T)=>void;const promise=new Promise<T>(done=>{resolve=done;});return {promise,resolve};}
@@ -25,4 +25,40 @@ it('завершение синхронизации удерживает гла�
  await Promise.resolve();expect(released).toBe(false);
  response.resolve({id:'saved',text:'Отправленный текст'});
  await Promise.all([syncing,waiting]);expect(released).toBe(true);
+});
+
+it('проверка удаления разделяет авторов и романы, сохраняя локальные правки',async()=>{
+ const {owner,chapter,revision}=await fixture(),otherOwner=crypto.randomUUID();
+ const sibling:Chapter={...chapter,id:crypto.randomUUID(),novel_id:crypto.randomUUID()};
+ await initialiseDraft(owner,sibling,{...revision,id:crypto.randomUUID(),chapter_id:sibling.id});
+ await initialiseDraft(otherOwner,chapter,revision);
+ expect(await listUnsyncedNovelDrafts(owner,chapter.novel_id)).toEqual([]);
+ await editDraft(owner,chapter.id,'Моя несохранённая глава');
+ await editDraft(owner,sibling.id,'Другой роман');
+ await editDraft(otherOwner,chapter.id,'Другой автор');
+ const blocked=await listUnsyncedNovelDrafts(owner,chapter.novel_id);
+ expect(blocked.map(d=>d.chapterId)).toEqual([chapter.id]);
+ expect((await getDraft(owner,chapter.id))?.text).toBe('Моя несохранённая глава');
+ expect((await listUnsyncedNovelDrafts(owner,sibling.novel_id))[0].text).toBe('Другой роман');
+});
+it('потерянное подтверждение блокирует удаление после возврата к исходному тексту',async()=>{
+ const {owner,chapter,revision}=await fixture();
+ await editDraft(owner,chapter.id,'Возможно, уже сохранено сервером');
+ await expect(syncDraft(owner,chapter.id,async()=>{throw new ApiError(0,{},'lost response');})).rejects.toThrow('lost response');
+ const before=await getDraft(owner,chapter.id);
+ await editDraft(owner,chapter.id,revision.text);
+ const blocked=await listUnsyncedNovelDrafts(owner,chapter.novel_id);
+ expect(blocked).toHaveLength(1);
+ expect(blocked[0].pending?.mutation_id).toBe(before?.pending?.mutation_id);
+ expect(blocked[0].text).toBe(revision.text);
+});
+it('неразрешённый конфликт блокирует удаление и сохраняет локальную версию',async()=>{
+ const {owner,chapter,revision}=await fixture();
+ await editDraft(owner,chapter.id,'Моя версия до конфликта');
+ await expect(syncDraft(owner,chapter.id,async()=>{throw new ApiError(409,{},'conflict');})).rejects.toThrow('conflict');
+ await editDraft(owner,chapter.id,revision.text);
+ const blocked=await listUnsyncedNovelDrafts(owner,chapter.novel_id);
+ expect(blocked).toHaveLength(1);
+ expect(blocked[0].state).toBe('conflict');
+ expect((await getDraft(owner,chapter.id))?.text).toBe(revision.text);
 });

@@ -42,6 +42,65 @@ def wait_saved(page, origin, chapter_id, text):
     raise AssertionError("Автосохранение не доставило текущий текст на сервер")
 
 
+def verify_trash_browser(page, desktop, origin, novel_id, chapter_id):
+    page.get_by_role('button', name='Библиотека', exact=True).click()
+    desktop.set_offline(True)
+    expect(page.get_by_test_id(f'novel-delete-{novel_id}')).to_be_disabled()
+    desktop.set_offline(False)
+    expect(page.get_by_test_id(f'novel-delete-{novel_id}')).to_be_enabled(timeout=15000)
+    open_chapter(page, novel_id, chapter_id)
+    existing = page.get_by_test_id('chapter-editor').input_value()
+    unsynced = existing + '\n\nРучная правка перед удалением: сохранить обязательно.'
+    endpoint = f'**/api/v1/chapters/{chapter_id}/text'
+    page.route(endpoint, lambda route: route.abort('failed'))
+    try:
+        page.get_by_test_id('chapter-editor').fill(unsynced)
+        page.wait_for_timeout(1400)
+        page.get_by_role('button', name='Библиотека', exact=True).click()
+        page.get_by_test_id(f'novel-delete-{novel_id}').click()
+        expect(page.get_by_test_id('novel-trash-blocked')).to_be_visible()
+        expect(page.get_by_test_id('novel-trash-confirm')).to_have_count(0)
+        assert page.request.get(f'{origin}/api/v1/novels/{novel_id}').ok
+    finally:
+        page.unroute(endpoint)
+    page.get_by_test_id(f'novel-blocked-chapter-{chapter_id}').click()
+    expect(page.get_by_test_id('chapter-editor')).to_have_value(unsynced)
+    wait_saved(page, origin, chapter_id, unsynced)
+    session = page.request.get(origin + '/api/v1/session').json()
+    headers = {'Origin': origin, 'X-CSRF-Token': session['csrf_token']}
+    response = page.request.post(f'{origin}/api/v1/novels/{novel_id}/bible', data={
+        'kind': 'idea', 'title': 'Идея для удаления', 'content': 'Неутверждённый вариант.', 'status': 'IDEA'}, headers=headers)
+    assert response.status == 201, response.text()
+    entry_id = response.json()['id']
+    page.get_by_role('button', name='Библия романа', exact=True).click()
+    page.get_by_test_id(f'bible-delete-{entry_id}').click()
+    page.get_by_test_id('bible-trash-cancel').click()
+    expect(page.get_by_test_id(f'bible-delete-{entry_id}')).to_be_visible()
+    page.get_by_test_id(f'bible-delete-{entry_id}').click()
+    page.get_by_test_id('bible-trash-confirm').click()
+    expect(page.get_by_test_id(f'bible-delete-{entry_id}')).to_have_count(0)
+    page.get_by_test_id('bible-trash-toggle').click()
+    page.get_by_test_id(f'bible-restore-{entry_id}').click()
+    expect(page.get_by_test_id(f'bible-restore-{entry_id}')).to_have_count(0)
+    restored_entries = page.request.get(f'{origin}/api/v1/novels/{novel_id}/bible').json()['items']
+    restored_entry = next(e for e in restored_entries if e['id'] == entry_id)
+    assert restored_entry['status'] == 'IDEA' and restored_entry['deleted_at'] is None
+    page.get_by_role('button', name='Библиотека', exact=True).click()
+    page.get_by_test_id(f'novel-delete-{novel_id}').click()
+    page.get_by_test_id('novel-trash-cancel').click()
+    expect(page.get_by_test_id(f'novel-open-{novel_id}')).to_be_visible()
+    page.get_by_test_id(f'novel-delete-{novel_id}').click()
+    page.get_by_test_id('novel-trash-confirm').click()
+    expect(page.get_by_test_id(f'novel-open-{novel_id}')).to_have_count(0)
+    page.get_by_test_id('novel-trash-toggle').click()
+    expect(page.get_by_test_id(f'novel-restore-{novel_id}')).to_be_visible()
+    page.screenshot(path=str(ARTIFACTS / 'reversible-trash.png'), full_page=True)
+    page.get_by_test_id(f'novel-restore-{novel_id}').click()
+    expect(page.get_by_test_id(f'novel-restore-{novel_id}')).to_have_count(0)
+    open_chapter(page, novel_id, chapter_id)
+    expect(page.get_by_test_id('chapter-editor')).to_have_value(unsynced)
+
+
 def main():
     ARTIFACTS.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="novel-browser-") as temporary:
@@ -141,6 +200,7 @@ def main():
                 expect(page.get_by_test_id("chapter-editor")).to_have_value(late_offline)
                 desktop.set_offline(False)
                 wait_saved(page, origin, late_id, late_offline)
+                verify_trash_browser(page, desktop, origin, novel_id, chapter_id)
                 print("Browser passed: desktop/mobile sync, offline reload/reconnect, two-tab locks and chapter 101 offline.")
             except Exception:
                 page.screenshot(path=str(ARTIFACTS / "failure.png"), full_page=True)

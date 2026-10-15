@@ -37,7 +37,7 @@ jobs:
       - name: Check dependency consistency
         run: python -m pip check
       - name: Check syntax
-        run: python -m compileall -q backend/app backend/scripts backend/migrations
+        run: python -m compileall -q backend/app backend/scripts backend/migrations tools
       - name: Apply durable database migrations
         working-directory: backend
         run: python -m app.cli migrate
