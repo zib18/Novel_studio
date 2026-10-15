@@ -108,3 +108,16 @@ export function syncDraft(owner:string,chapterId:string,transport:SaveTransport)
 export async function waitForDraftSync(owner:string,chapterId:string):Promise<void>{
  await inFlight.get(localKey(owner,chapterId))?.catch(()=>undefined);
 }
+
+/** Pending mutations include responses lost during synchronization. */
+export async function listUnsyncedNovelDrafts(owner:string,novelId:string):Promise<Draft[]>{
+ const database=await db();return new Promise((resolve,reject)=>{
+  const tx=database.transaction('drafts','readonly'),request=tx.objectStore('drafts').openCursor(),results:Draft[]=[];
+  request.onsuccess=()=>{const cursor=request.result;if(!cursor)return;const value=cursor.value as Draft;
+   if(value.owner===owner&&value.novelId===novelId&&(value.pending||value.text!==value.syncedText||value.state==='conflict'))results.push(value);
+   cursor.continue();
+  };
+  request.onerror=()=>reject(request.error);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error??new Error('Не удалось проверить локальные черновики.'));
+  tx.oncomplete=()=>resolve(results.sort((a,b)=>b.modifiedAt.localeCompare(a.modifiedAt)));
+ });
+}

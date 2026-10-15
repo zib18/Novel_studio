@@ -31,6 +31,7 @@ class WebSession(Base):
 
 
 class Novel(Base):
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     __tablename__ = "novels"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
@@ -75,6 +76,7 @@ class Revision(Base):
 
 
 class BibleEntry(Base):
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     __tablename__ = "bible_entries"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     novel_id: Mapped[str] = mapped_column(ForeignKey("novels.id"), index=True)

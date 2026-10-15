@@ -57,7 +57,7 @@ def create_novel(body: NovelCreate, db: Session = Depends(get_db), user=Depends(
 
 @router.get("/novels")
 def list_novels(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    novels = db.scalars(select(Novel).where(Novel.owner_id == user.id).order_by(Novel.updated_at.desc()))
+    novels = db.scalars(select(Novel).where(Novel.owner_id == user.id, Novel.deleted_at.is_(None)).order_by(Novel.updated_at.desc()))
     result = []
     for novel in novels:
         item = record_dict(novel)
@@ -204,7 +204,7 @@ def approve_chapter(chapter_id: str, body: ChapterApproval, db: Session = Depend
 def list_bible(novel_id: str, limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0),
                db: Session = Depends(get_db), user=Depends(get_current_user)):
     owned_novel(db, novel_id, user)
-    where = BibleEntry.novel_id == novel_id
+    where = (BibleEntry.novel_id == novel_id) & BibleEntry.deleted_at.is_(None)
     entries = db.scalars(select(BibleEntry).where(where).order_by(BibleEntry.created_at)
                          .limit(limit).offset(offset))
     return {"items": [record_dict(entry) for entry in entries],

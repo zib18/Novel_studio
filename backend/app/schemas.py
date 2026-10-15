@@ -103,3 +103,8 @@ class RejectionCreate(InputModel):
     description: str = Field(min_length=1, max_length=10000)
     scope: str | None = None
     severity: Literal["warning", "major", "critical"] = "critical"
+
+
+class TrashAction(InputModel):
+    base_version: int = Field(ge=1)
+    expected_canon_version: int = Field(ge=1)

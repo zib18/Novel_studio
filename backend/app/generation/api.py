@@ -28,6 +28,7 @@ def owned_job(db, job_id, user):
     if job is None:
         raise HTTPException(404, "Задача не найдена.")
     owned_novel(db, job.novel_id, user)
+    db.refresh(job)
     return job
 
 
@@ -156,8 +157,9 @@ def apply_job(job_id: str, body: ApplyJob, db=Depends(get_db), user=Depends(get_
     if not candidate:
         raise HTTPException(409, "Нет сохранённого текста.")
     locked = db.execute(update(Novel).where(
-        Novel.id == job.novel_id, Novel.canon_version == job.canon_version
-    ).values(canon_version=Novel.canon_version)).rowcount
+        Novel.id == job.novel_id, Novel.owner_id == user.id,
+        Novel.deleted_at.is_(None), Novel.canon_version == job.canon_version
+    ).values(canon_version=Novel.canon_version, updated_at=Novel.updated_at)).rowcount
     if locked != 1:
         db.rollback()
         raise HTTPException(409, "Канон изменился после запуска. Перепроверьте текст.")
